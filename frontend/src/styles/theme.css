@@ -1,0 +1,67 @@
+/* RedTrack v2 — Design tokens */
+
+:root[data-theme="dark"] {
+  --bg: #0d0f14;
+  --surface: #141720;
+  --surface2: #1a1e2a;
+  --surface3: #1f2535;
+  --border: #252b3b;
+  --border2: #2e3650;
+  --text: #e2e8f0;
+  --muted: #6b7899;
+  --muted2: #4a5568;
+  --red: #e05252;
+  --red-dim: #3d1a1a;
+  --red-mid: #8b2c2c;
+  --amber: #f0883e;
+  --amber-dim: #3d2510;
+  --green: #4ade80;
+  --green-dim: #142b1f;
+  --blue: #60a5fa;
+  --blue-dim: #172040;
+  --purple: #a78bfa;
+  --purple-dim: #2a1f4a;
+  --accent: #e05252;
+}
+
+:root[data-theme="light"] {
+  --bg: #f1f5f9;
+  --surface: #ffffff;
+  --surface2: #f8fafc;
+  --surface3: #f1f5f9;
+  --border: #e2e8f0;
+  --border2: #cbd5e1;
+  --text: #1e293b;
+  --muted: #64748b;
+  --muted2: #94a3b8;
+  --red: #dc2626;
+  --red-dim: #fee2e2;
+  --red-mid: #fca5a5;
+  --amber: #d97706;
+  --amber-dim: #fef3c7;
+  --green: #16a34a;
+  --green-dim: #dcfce7;
+  --blue: #2563eb;
+  --blue-dim: #dbeafe;
+  --purple: #7c3aed;
+  --purple-dim: #ede9fe;
+  --accent: #dc2626;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  transition: background 0.2s, color 0.2s;
+}
+
+input, select, textarea, button {
+  font-family: 'Courier New', monospace;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }

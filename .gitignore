@@ -1,0 +1,32 @@
+# Environment - never commit secrets
+.env
+
+# SSL certs - generate locally
+nginx/certs/
+
+# Docker volumes
+postgres_data/
+uploads_data/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
