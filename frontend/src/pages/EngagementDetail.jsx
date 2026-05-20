@@ -43,6 +43,8 @@ export default function EngagementDetail() {
   const [massEditField, setMassEditField] = useState('')
   const [massEditVal, setMassEditVal] = useState('')
   const [showAddHost, setShowAddHost] = useState(false)
+  const [showAddFinding, setShowAddFinding] = useState(false)
+  const [findingForm, setFindingForm] = useState({ title: '', severity: 'High', cvss_score: '', cwe: '', affected_component: '', description: '', remediation: '' })
   const [nmapUploading, setNmapUploading] = useState(false)
   const [scannerType, setScannerType] = useState('nessus')
   const [scanImporting, setScanImporting] = useState(false)
@@ -79,6 +81,27 @@ export default function EngagementDetail() {
   const addHostMutation = useMutation(
     (data) => reconApi.addHost(id, data),
     { onSuccess: () => { qc.invalidateQueries(['hosts', id]); setShowAddHost(false); setNewHost({ ip_address: '', hostname: '', os: '', ports: '', notes: '' }); toast.success('Host added') } }
+  )
+
+  const createFindingMutation = useMutation(
+    (data) => findingsApi.create(id, data),
+    {
+      onSuccess: () => {
+        qc.invalidateQueries(['findings', id])
+        setShowAddFinding(false)
+        setFindingForm({ title: '', severity: 'High', cvss_score: '', cwe: '', affected_component: '', description: '', remediation: '' })
+        toast.success('Finding created')
+      },
+      onError: () => toast.error('Failed to create finding'),
+    }
+  )
+
+  const deleteFindingMutation = useMutation(
+    (findingId) => findingsApi.delete(findingId),
+    {
+      onSuccess: () => { qc.invalidateQueries(['findings', id]); toast.success('Finding deleted') },
+      onError: () => toast.error('Failed to delete finding'),
+    }
   )
 
   const deleteHostMutation = useMutation(
@@ -546,22 +569,85 @@ export default function EngagementDetail() {
         {/* ── Findings ── */}
         {(tab === 'Findings') && (
           <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{sortedFindings.length} findings</div>
+              <button style={s.btnPrimary} onClick={() => setShowAddFinding(!showAddFinding)}>+ Add Finding</button>
+            </div>
+
+            {showAddFinding && (
+              <div style={{ background: 'var(--surface2)', border: '1px solid var(--border2)', borderRadius: 8, padding: 16, marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '.08em' }}>New Finding</div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={s.fieldLabel}>Title *</div>
+                  <input style={s.input} value={findingForm.title} onChange={e => setFindingForm({ ...findingForm, title: e.target.value })} placeholder="e.g. SQL Injection in login endpoint" />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+                  <div>
+                    <div style={s.fieldLabel}>Severity</div>
+                    <select style={s.input} value={findingForm.severity} onChange={e => setFindingForm({ ...findingForm, severity: e.target.value })}>
+                      {['Critical', 'High', 'Medium', 'Low', 'Info'].map(sv => <option key={sv}>{sv}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={s.fieldLabel}>CVSS Score</div>
+                    <input style={s.input} value={findingForm.cvss_score} onChange={e => setFindingForm({ ...findingForm, cvss_score: e.target.value })} placeholder="e.g. 9.1" />
+                  </div>
+                  <div>
+                    <div style={s.fieldLabel}>CWE</div>
+                    <input style={s.input} value={findingForm.cwe} onChange={e => setFindingForm({ ...findingForm, cwe: e.target.value })} placeholder="e.g. CWE-89" />
+                  </div>
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={s.fieldLabel}>Affected Component</div>
+                  <input style={s.input} value={findingForm.affected_component} onChange={e => setFindingForm({ ...findingForm, affected_component: e.target.value })} placeholder="e.g. /api/login" />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <div style={s.fieldLabel}>Description</div>
+                  <textarea style={{ ...s.input, minHeight: 60, resize: 'vertical' }} value={findingForm.description} onChange={e => setFindingForm({ ...findingForm, description: e.target.value })} />
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={s.fieldLabel}>Remediation</div>
+                  <textarea style={{ ...s.input, minHeight: 60, resize: 'vertical' }} value={findingForm.remediation} onChange={e => setFindingForm({ ...findingForm, remediation: e.target.value })} />
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button style={s.btnPrimary} disabled={!findingForm.title || createFindingMutation.isLoading}
+                    onClick={() => createFindingMutation.mutate({ ...findingForm, cvss_score: findingForm.cvss_score ? parseFloat(findingForm.cvss_score) : null })}>
+                    {createFindingMutation.isLoading ? 'Creating...' : 'Create Finding'}
+                  </button>
+                  <button style={s.btn} onClick={() => setShowAddFinding(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+
             <table style={s.table}>
               <thead>
-                <tr>{['ID', 'Title', 'Severity', 'CVSS', 'Status', 'Source'].map(h => <th key={h} style={s.th}>{h}</th>)}</tr>
+                <tr>{['ID', 'Title', 'Severity', 'CVSS', 'Status', 'Source', ''].map(h => <th key={h} style={s.th}>{h}</th>)}</tr>
               </thead>
               <tbody>
                 {sortedFindings.length ? sortedFindings.map(f => (
-                  <tr key={f.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/findings/${f.id}`)}>
-                    <td style={{ ...s.td, color: 'var(--blue)', fontFamily: 'monospace', fontSize: 10 }}>{f.ref_id}</td>
-                    <td style={s.td}><strong style={{ fontSize: 12 }}>{f.title}</strong></td>
+                  <tr key={f.id}>
+                    <td style={{ ...s.td, color: 'var(--blue)', fontFamily: 'monospace', fontSize: 10, cursor: 'pointer' }} onClick={() => navigate(`/findings/${f.id}`)}>{f.ref_id}</td>
+                    <td style={{ ...s.td, cursor: 'pointer' }} onClick={() => navigate(`/findings/${f.id}`)}><strong style={{ fontSize: 12 }}>{f.title}</strong></td>
                     <td style={s.td}><span style={{ ...s.sevBadge, color: SEV_COLOR[f.severity], borderColor: SEV_COLOR[f.severity] + '55' }}>{f.severity}</span></td>
                     <td style={{ ...s.td, fontFamily: 'monospace', fontSize: 11, color: SEV_COLOR[f.severity] }}>{f.cvss_score || '—'}</td>
-                    <td style={s.td}><span style={s.tag}>{f.status}</span></td>
+                    <td style={s.td}>
+                      <select style={{ ...s.input, padding: '3px 6px', fontSize: 10, width: 'auto' }}
+                        value={f.status}
+                        onChange={e => findingsApi.update(f.id, { status: e.target.value }).then(() => qc.invalidateQueries(['findings', id]))}>
+                        {['Open', 'In Review', 'Remediated', 'Accepted', 'False Positive'].map(st => <option key={st}>{st}</option>)}
+                      </select>
+                    </td>
                     <td style={s.td}><span style={s.tag}>{f.source || 'manual'}</span></td>
+                    <td style={s.td}>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button style={{ ...s.btn, padding: '3px 8px', fontSize: 10 }} onClick={() => navigate(`/findings/${f.id}`)}>Edit</button>
+                        <button style={{ background: 'none', border: '1px solid var(--red-mid)', borderRadius: 4, color: 'var(--red)', padding: '3px 8px', fontSize: 10, cursor: 'pointer', fontFamily: 'monospace' }}
+                          onClick={() => { if (confirm('Delete ' + f.ref_id + '?')) deleteFindingMutation.mutate(f.id) }}>Del</button>
+                      </div>
+                    </td>
                   </tr>
                 )) : (
-                  <tr><td colSpan={6} style={{ ...s.td, textAlign: 'center', color: 'var(--muted)', padding: 32 }}>No findings yet</td></tr>
+                  <tr><td colSpan={7} style={{ ...s.td, textAlign: 'center', color: 'var(--muted)', padding: 32 }}>No findings yet. Click + Add Finding or import a scanner file.</td></tr>
                 )}
               </tbody>
             </table>
