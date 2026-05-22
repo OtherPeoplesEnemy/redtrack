@@ -3,7 +3,7 @@ RedTrack v2 — Main API Entry Point
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -14,12 +14,14 @@ from typing import Optional
 from datetime import datetime, timezone
 import uuid
 import aiofiles
+import hashlib
+import hmac
 
 from config import get_settings
 from database import create_tables, get_db
 from models import (
     User, Engagement, Finding, Evidence, Comment, Report,
-    VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask,
+    VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration,
     Severity, FindingStatus, EngagementStatus, UserRole
 )
 from auth import (
@@ -244,6 +246,16 @@ async def create_engagement(body: dict, db: AsyncSession = Depends(get_db), curr
     await db.flush()
     member = EngagementMember(engagement_id=eng.id, user_id=current_user.id, role="lead")
     db.add(member)
+    await db.flush()
+    # Slack notification
+    try:
+        from slack_service import notify_new_engagement
+        webhook_url, base_url = await _get_slack_config(db)
+        if webhook_url:
+            import asyncio
+            asyncio.create_task(notify_new_engagement(webhook_url, base_url, eng))
+    except Exception:
+        pass
     return await _eng_out(eng, db)
 
 
@@ -323,6 +335,17 @@ async def create_finding(engagement_id: uuid.UUID, body: dict, db: AsyncSession 
     finding = Finding(**data, engagement_id=engagement_id, tester_id=current_user.id, ref_id=ref_id)
     db.add(finding)
     await db.flush()
+    # Slack notification for high/critical
+    try:
+        from slack_service import notify_new_finding
+        webhook_url, base_url = await _get_slack_config(db)
+        if webhook_url:
+            eng = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
+            if eng:
+                import asyncio
+                asyncio.create_task(notify_new_finding(webhook_url, base_url, finding, eng))
+    except Exception:
+        pass
     return _finding_out(finding)
 
 
@@ -1090,7 +1113,57 @@ async def import_scan(
     content_bytes = await file.read()
     try:
         xml_content = content_bytes.decode("utf-8", errors="ignore")
-        result = parse_scan(scanner, xml_content)
+        if scanner.lower() == "nmap":
+            # Use existing nmap parser
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_content)
+            hosts_list = []
+            for host_el in root.findall("host"):
+                status_el = host_el.find("status")
+                if status_el is None or status_el.get("state") != "up":
+                    continue
+                ip = None
+                for addr_el in host_el.findall("address"):
+                    if addr_el.get("addrtype") == "ipv4":
+                        ip = addr_el.get("addr")
+                        break
+                if not ip:
+                    continue
+                hostname = None
+                hostnames_el = host_el.find("hostnames")
+                if hostnames_el is not None:
+                    hn = hostnames_el.find("hostname")
+                    if hn is not None:
+                        hostname = hn.get("name")
+                os_name = None
+                os_el = host_el.find("os")
+                if os_el is not None:
+                    matches = os_el.findall("osmatch")
+                    if matches:
+                        os_name = matches[0].get("name")
+                ports = []
+                services = []
+                ports_el = host_el.find("ports")
+                if ports_el is not None:
+                    for port_el in ports_el.findall("port"):
+                        state_el = port_el.find("state")
+                        if state_el is None or state_el.get("state") != "open":
+                            continue
+                        port_num = int(port_el.get("portid", 0))
+                        protocol = port_el.get("protocol", "tcp")
+                        ports.append(port_num)
+                        svc = {"port": port_num, "protocol": protocol, "state": "open", "service": "", "banner": ""}
+                        svc_el = port_el.find("service")
+                        if svc_el is not None:
+                            svc["service"] = svc_el.get("name", "")
+                            product = svc_el.get("product", "")
+                            version = svc_el.get("version", "")
+                            svc["banner"] = f"{product} {version}".strip()
+                        services.append(svc)
+                hosts_list.append({"ip_address": ip, "hostname": hostname, "os": os_name, "ports": ports, "services": services, "source": "nmap"})
+            result = {"hosts": hosts_list, "findings": []}
+        else:
+            result = parse_scan(scanner, xml_content)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -1167,6 +1240,104 @@ async def import_scan(
         "findings_added": findings_added,
         "message": f"{scanner.title()} import complete: {hosts_added} new hosts, {hosts_updated} updated, {findings_added} findings created"
     }
+
+
+# ─── Integrations ─────────────────────────────────────────────────────────────
+
+async def _get_integration(name: str, db: AsyncSession) -> Optional[Integration]:
+    result = await db.execute(select(Integration).where(Integration.name == name))
+    return result.scalar_one_or_none()
+
+
+async def _get_slack_config(db: AsyncSession) -> tuple[str, str]:
+    """Returns (webhook_url, base_url)"""
+    integ = await _get_integration("slack", db)
+    if not integ or not integ.enabled or not integ.config:
+        return "", ""
+    return integ.config.get("webhook_url", ""), integ.config.get("base_url", "")
+
+
+@app.get("/integrations/")
+async def list_integrations(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    result = await db.execute(select(Integration))
+    integrations = result.scalars().all()
+    return [{"id": str(i.id), "name": i.name, "enabled": i.enabled, "config": i.config, "updated_at": str(i.updated_at)} for i in integrations]
+
+
+@app.put("/integrations/{name}")
+async def save_integration(name: str, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    integ = await _get_integration(name, db)
+    if integ:
+        integ.enabled = body.get("enabled", integ.enabled)
+        integ.config = body.get("config", integ.config)
+    else:
+        integ = Integration(name=name, enabled=body.get("enabled", False), config=body.get("config", {}))
+        db.add(integ)
+    await db.flush()
+    return {"name": integ.name, "enabled": integ.enabled, "config": integ.config}
+
+
+@app.post("/integrations/slack/test")
+async def test_slack(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    from slack_service import send_slack_message
+    webhook_url, base_url = await _get_slack_config(db)
+    if not webhook_url:
+        raise HTTPException(400, "Slack webhook URL not configured")
+    success = await send_slack_message(webhook_url, {
+        "text": f"✅ RedTrack Slack integration is working! Connected from {base_url or 'RedTrack'}"
+    })
+    if success:
+        return {"message": "Test message sent successfully"}
+    raise HTTPException(500, "Failed to send test message — check your webhook URL")
+
+
+@app.post("/integrations/slack/digest")
+async def send_digest(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    from slack_service import send_daily_digest
+    webhook_url, base_url = await _get_slack_config(db)
+    if not webhook_url:
+        raise HTTPException(400, "Slack not configured")
+    engs = (await db.execute(select(Engagement))).scalars().all()
+    findings = (await db.execute(select(Finding))).scalars().all()
+    success = await send_daily_digest(webhook_url, base_url, engs, findings)
+    if success:
+        return {"message": "Daily digest sent"}
+    raise HTTPException(500, "Failed to send digest")
+
+
+@app.post("/integrations/slack/commands")
+async def slack_slash_command(request: Request, db: AsyncSession = Depends(get_db)):
+    """Handle Slack slash commands."""
+    from slack_service import handle_slash_command
+    from fastapi import Request
+
+    # Parse form data from Slack
+    form = await request.form()
+    command = form.get("command", "/redtrack")
+    text = form.get("text", "")
+    token = form.get("token", "")
+
+    # Verify Slack signing secret
+    integ = await _get_integration("slack", db)
+    if integ and integ.config:
+        signing_secret = integ.config.get("signing_secret", "")
+        if signing_secret:
+            timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+            slack_signature = request.headers.get("X-Slack-Signature", "")
+            body = await request.body()
+            sig_basestring = f"v0:{timestamp}:{body.decode()}"
+            my_signature = "v0=" + hmac.new(
+                signing_secret.encode(), sig_basestring.encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(my_signature, slack_signature):
+                raise HTTPException(401, "Invalid Slack signature")
+
+    _, base_url = await _get_slack_config(db)
+    engs = (await db.execute(select(Engagement))).scalars().all()
+    findings = (await db.execute(select(Finding))).scalars().all()
+
+    response = await handle_slash_command(command, text, engs, findings, base_url)
+    return response
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
 
