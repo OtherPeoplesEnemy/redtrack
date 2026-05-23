@@ -1,8 +1,4 @@
-"""
-Seeds the database on first startup.
-- Admin user (uses .com domain to pass email validation)
-- Vuln template library
-"""
+"""\nSeeds the database on first startup.\n- Admin user (uses .com domain to pass email validation)\n- Vuln template library\n"""
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -161,9 +157,7 @@ TASK_TEMPLATES = [
 
     {"title": "DNS Enumeration & Subdomain Discovery", "category": "Recon & OSINT", "priority": "High",
      "description": "Enumerate DNS records and discover subdomains using multiple techniques.",
-     "tools": "amass enum -d <domain>
-subfinder -d <domain>
-dnsx -d <domain>",
+     "tools": "amass enum -d <domain>\nsubfinder -d <domain>\ndnsx -d <domain>",
      "tags": ["recon", "dns", "subdomains"], "engagement_types": ["Web App", "Red Team", "Network"]},
 
     {"title": "Certificate Transparency Log Search", "category": "Recon & OSINT", "priority": "Medium",
@@ -173,213 +167,167 @@ dnsx -d <domain>",
 
     {"title": "Google Dorks", "category": "Recon & OSINT", "priority": "Medium",
      "description": "Use Google dorking to find exposed files, login pages, and sensitive information.",
-     "tools": 'site:<target> filetype:pdf
-site:<target> inurl:admin
-site:<target> ext:sql OR ext:env',
+     "tools": 'site:<target> filetype:pdf\nsite:<target> inurl:admin\nsite:<target> ext:sql OR ext:env',
      "tags": ["recon", "osint", "google"], "engagement_types": ["Web App", "Red Team"]},
 
     {"title": "GitHub Secret Scanning", "category": "Recon & OSINT", "priority": "High",
      "description": "Search GitHub for accidentally committed secrets, API keys, and credentials.",
-     "tools": "trufflehog github --org=<orgname>
-gitdorks_go -q <target>",
+     "tools": "trufflehog github --org=<orgname>\ngitdorks_go -q <target>",
      "tags": ["recon", "osint", "github", "secrets"], "engagement_types": ["Web App", "Red Team", "Cloud"]},
 
     {"title": "Wayback Machine Recon", "category": "Recon & OSINT", "priority": "Low",
      "description": "Check archived versions of target website for old endpoints, files, and credentials.",
-     "tools": "waybackurls <domain> | sort -u
-gau <domain>",
+     "tools": "waybackurls <domain> | sort -u\ngau <domain>",
      "references": "https://web.archive.org", "tags": ["recon", "osint", "wayback"], "engagement_types": ["Web App"]},
 
     {"title": "WHOIS & ASN Lookup", "category": "Recon & OSINT", "priority": "Low",
      "description": "Gather ownership information, ASN ranges, and IP blocks for the target org.",
-     "tools": "whois <domain>
-whois <ip>
-amass intel -org <orgname>",
+     "tools": "whois <domain>\nwhois <ip>\namass intel -org <orgname>",
      "tags": ["recon", "osint", "whois"], "engagement_types": ["Network", "Web App", "Red Team"]},
 
     {"title": "LinkedIn & Social OSINT", "category": "Recon & OSINT", "priority": "Medium",
      "description": "Gather employee names, roles, email formats, and technology stack from LinkedIn and social media.",
-     "tools": "linkedin2username
-theHarvester -d <domain> -b linkedin",
+     "tools": "linkedin2username\ntheHarvester -d <domain> -b linkedin",
      "tags": ["recon", "osint", "social"], "engagement_types": ["Red Team", "Social Engineering"]},
 
     # ── Web Application ────────────────────────────────────────────────────────
     {"title": "Directory & File Bruteforce", "category": "Web Application", "priority": "High",
      "description": "Enumerate hidden directories and files on the web server.",
-     "tools": "ffuf -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -u https://<target>/FUZZ
-feroxbuster -u https://<target>",
+     "tools": "ffuf -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -u https://<target>/FUZZ\nferoxbuster -u https://<target>",
      "tags": ["web", "enumeration", "ffuf"], "engagement_types": ["Web App", "Red Team"]},
 
     {"title": "Burp Suite Spider & Active Scan", "category": "Web Application", "priority": "High",
      "description": "Spider the application to map all endpoints then run active scanner.",
-     "tools": "Burp Suite Pro — Spider + Active Scan
-Burp Suite Community — Manual crawl",
+     "tools": "Burp Suite Pro — Spider + Active Scan\nBurp Suite Community — Manual crawl",
      "tags": ["web", "burp", "scanning"], "engagement_types": ["Web App"]},
 
     {"title": "Authentication Testing", "category": "Web Application", "priority": "High",
      "description": "Test authentication mechanisms for weaknesses including brute force, default creds, password reset flaws, and MFA bypass.",
-     "tools": "hydra -L users.txt -P passwords.txt <target> http-post-form
-Burp Suite Intruder",
+     "tools": "hydra -L users.txt -P passwords.txt <target> http-post-form\nBurp Suite Intruder",
      "tags": ["web", "authentication"], "engagement_types": ["Web App", "Red Team"]},
 
     {"title": "SQL Injection Testing", "category": "Web Application", "priority": "High",
      "description": "Test all input fields for SQL injection vulnerabilities.",
-     "tools": "sqlmap -u <url> --forms --crawl=3
-Manual testing with Burp Suite",
+     "tools": "sqlmap -u <url> --forms --crawl=3\nManual testing with Burp Suite",
      "tags": ["web", "sqli", "injection"], "engagement_types": ["Web App"]},
 
     {"title": "XSS Testing", "category": "Web Application", "priority": "Medium",
      "description": "Test for reflected, stored, and DOM-based cross-site scripting.",
-     "tools": "dalfox url <url>
-Burp Suite Scanner
-Manual payload testing",
+     "tools": "dalfox url <url>\nBurp Suite Scanner\nManual payload testing",
      "tags": ["web", "xss"], "engagement_types": ["Web App"]},
 
     {"title": "API Endpoint Enumeration", "category": "Web Application", "priority": "High",
      "description": "Discover and test API endpoints for authentication issues, IDOR, and injection.",
-     "tools": "kiterunner scan <target>
-ffuf -w api_wordlist.txt -u <target>/api/FUZZ",
+     "tools": "kiterunner scan <target>\nffuf -w api_wordlist.txt -u <target>/api/FUZZ",
      "tags": ["web", "api"], "engagement_types": ["Web App"]},
 
     {"title": "CORS Misconfiguration Testing", "category": "Web Application", "priority": "Medium",
      "description": "Test for CORS misconfigurations that allow unauthorized cross-origin requests.",
-     "tools": "corsy -u <url>
-Manual Origin header manipulation in Burp",
+     "tools": "corsy -u <url>\nManual Origin header manipulation in Burp",
      "tags": ["web", "cors"], "engagement_types": ["Web App"]},
 
     {"title": "File Upload Testing", "category": "Web Application", "priority": "High",
      "description": "Test file upload functionality for unrestricted file upload leading to RCE.",
-     "tools": "Upload webshell variants
-Test MIME type bypass
-Test extension bypass",
+     "tools": "Upload webshell variants\nTest MIME type bypass\nTest extension bypass",
      "tags": ["web", "upload", "rce"], "engagement_types": ["Web App"]},
 
     {"title": "SSRF Testing", "category": "Web Application", "priority": "High",
      "description": "Test for Server-Side Request Forgery in URL parameters and file import features.",
-     "tools": "Burp Collaborator
-SSRFire
-Manual testing with internal IP payloads",
+     "tools": "Burp Collaborator\nSSRFire\nManual testing with internal IP payloads",
      "tags": ["web", "ssrf"], "engagement_types": ["Web App", "Cloud"]},
 
     # ── Network & Internal ─────────────────────────────────────────────────────
     {"title": "SMB Enumeration", "category": "Network & Internal", "priority": "High",
      "description": "Enumerate SMB shares, sessions, users, and check for signing disabled.",
-     "tools": "crackmapexec smb <target> --shares
-nmap --script smb-enum-shares <target>
-smbclient -L //<target>",
+     "tools": "crackmapexec smb <target> --shares\nnmap --script smb-enum-shares <target>\nsmbclient -L //<target>",
      "tags": ["network", "smb", "crackmapexec"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "LDAP Enumeration", "category": "Network & Internal", "priority": "High",
      "description": "Enumerate Active Directory users, groups, and attributes via LDAP.",
-     "tools": "ldapdomaindump -u <domain>\<user> -p <pass> <dc>
-bloodhound-python -d <domain> -u <user> -p <pass> -c all",
+     "tools": "ldapdomaindump -u <domain>\<user> -p <pass> <dc>\nbloodhound-python -d <domain> -u <user> -p <pass> -c all",
      "tags": ["network", "ldap", "ad"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "BloodHound AD Collection", "category": "Network & Internal", "priority": "High",
      "description": "Collect Active Directory data for BloodHound attack path analysis.",
-     "tools": "bloodhound-python -d <domain> -u <user> -p <pass> -c all --zip
-SharpHound.exe -c all",
+     "tools": "bloodhound-python -d <domain> -u <user> -p <pass> -c all --zip\nSharpHound.exe -c all",
      "tags": ["network", "ad", "bloodhound"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "Kerberoasting", "category": "Network & Internal", "priority": "High",
      "description": "Request service tickets for SPNs and crack offline to obtain service account passwords.",
-     "tools": "impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip <dc> -request
-hashcat -m 13100 hashes.txt wordlist.txt",
+     "tools": "impacket-GetUserSPNs <domain>/<user>:<pass> -dc-ip <dc> -request\nhashcat -m 13100 hashes.txt wordlist.txt",
      "tags": ["network", "kerberos", "ad"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "AS-REP Roasting", "category": "Network & Internal", "priority": "Medium",
      "description": "Target accounts with Kerberos pre-authentication disabled.",
-     "tools": "impacket-GetNPUsers <domain>/ -usersfile users.txt -dc-ip <dc>
-hashcat -m 18200 hashes.txt wordlist.txt",
+     "tools": "impacket-GetNPUsers <domain>/ -usersfile users.txt -dc-ip <dc>\nhashcat -m 18200 hashes.txt wordlist.txt",
      "tags": ["network", "kerberos", "ad"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "Password Spraying", "category": "Network & Internal", "priority": "High",
      "description": "Spray common passwords against all domain accounts to avoid lockout.",
-     "tools": "crackmapexec smb <dc> -u users.txt -p 'Password123' --continue-on-success
-kerbrute passwordspray users.txt Password123",
+     "tools": "crackmapexec smb <dc> -u users.txt -p 'Password123' --continue-on-success\nkerbrute passwordspray users.txt Password123",
      "tags": ["network", "ad", "passwords"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "Pass-the-Hash", "category": "Network & Internal", "priority": "High",
      "description": "Use captured NTLM hashes to authenticate without cracking.",
-     "tools": "crackmapexec smb <target> -u <user> -H <hash>
-impacket-psexec <domain>/<user>@<target> -hashes :<hash>",
+     "tools": "crackmapexec smb <target> -u <user> -H <hash>\nimpacket-psexec <domain>/<user>@<target> -hashes :<hash>",
      "tags": ["network", "pth", "ad"], "engagement_types": ["Network", "Red Team"]},
 
     {"title": "SNMP Enumeration", "category": "Network & Internal", "priority": "Medium",
      "description": "Enumerate SNMP community strings and gather system information.",
-     "tools": "onesixtyone -c community.txt <target>
-snmpwalk -c public -v1 <target>",
+     "tools": "onesixtyone -c community.txt <target>\nsnmpwalk -c public -v1 <target>",
      "tags": ["network", "snmp"], "engagement_types": ["Network"]},
 
     # ── Cloud ──────────────────────────────────────────────────────────────────
     {"title": "S3 Bucket Enumeration", "category": "Cloud Security", "priority": "High",
      "description": "Discover and test S3 buckets for public access and misconfiguration.",
-     "tools": "aws s3 ls s3://<bucket>
-s3scanner scan --buckets-file buckets.txt
-GrayhatWarfare",
+     "tools": "aws s3 ls s3://<bucket>\ns3scanner scan --buckets-file buckets.txt\nGrayhatWarfare",
      "tags": ["cloud", "aws", "s3"], "engagement_types": ["Cloud", "Red Team"]},
 
     {"title": "AWS IAM Privilege Escalation", "category": "Cloud Security", "priority": "High",
      "description": "Enumerate IAM permissions and identify privilege escalation paths.",
-     "tools": "pacu
-aws-escalate
-enumerate-iam",
+     "tools": "pacu\naws-escalate\nenumerate-iam",
      "tags": ["cloud", "aws", "iam"], "engagement_types": ["Cloud"]},
 
     {"title": "Azure AD Enumeration", "category": "Cloud Security", "priority": "High",
      "description": "Enumerate Azure AD users, groups, applications, and service principals.",
-     "tools": "roadrecon gather
-aad-internals
-stormspotter",
+     "tools": "roadrecon gather\naad-internals\nstormspotter",
      "tags": ["cloud", "azure", "aad"], "engagement_types": ["Cloud", "Red Team"]},
 
     # ── AI Red Team ────────────────────────────────────────────────────────────
     {"title": "Prompt Injection Testing", "category": "AI Red Team", "priority": "Critical",
      "description": "Test LLM endpoints for prompt injection — attempt to override system prompt and extract instructions.",
-     "tools": "Manual crafted prompts
-GPTFuzz
-PromptBench",
+     "tools": "Manual crafted prompts\nGPTFuzz\nPromptBench",
      "tags": ["ai", "llm", "prompt-injection"], "engagement_types": ["AI Red Team"]},
 
     {"title": "System Prompt Extraction", "category": "AI Red Team", "priority": "High",
      "description": "Attempt to extract the hidden system prompt using various jailbreak and extraction techniques.",
-     "tools": "Manual prompting: 'Repeat everything above'
-Indirect extraction via reflection",
+     "tools": "Manual prompting: 'Repeat everything above'\nIndirect extraction via reflection",
      "tags": ["ai", "llm", "system-prompt"], "engagement_types": ["AI Red Team"]},
 
     {"title": "Jailbreak Testing", "category": "AI Red Team", "priority": "High",
      "description": "Test safety filter bypass using DAN, roleplay, encoding, and other jailbreak techniques.",
-     "tools": "Manual jailbreak prompts
-JailbreakBench dataset
-Base64/ROT13 encoding bypass",
+     "tools": "Manual jailbreak prompts\nJailbreakBench dataset\nBase64/ROT13 encoding bypass",
      "tags": ["ai", "llm", "jailbreak"], "engagement_types": ["AI Red Team"]},
 
     {"title": "Training Data Extraction", "category": "AI Red Team", "priority": "High",
      "description": "Attempt to extract memorized training data including PII, credentials, and proprietary content.",
-     "tools": "Membership inference attacks
-Model inversion techniques
-Repeat token attack",
+     "tools": "Membership inference attacks\nModel inversion techniques\nRepeat token attack",
      "tags": ["ai", "llm", "training-data"], "engagement_types": ["AI Red Team"]},
 
     {"title": "Indirect Prompt Injection via RAG", "category": "AI Red Team", "priority": "Critical",
      "description": "Inject malicious instructions into RAG data sources that the model will retrieve and execute.",
-     "tools": "Poison vector database entries
-Malicious document injection
-Web content poisoning",
+     "tools": "Poison vector database entries\nMalicious document injection\nWeb content poisoning",
      "tags": ["ai", "llm", "rag", "indirect-injection"], "engagement_types": ["AI Red Team"]},
 
     {"title": "LLM Agent Tool Abuse", "category": "AI Red Team", "priority": "Critical",
      "description": "Test LLM agents for excessive agency — attempt to trigger unauthorized tool calls and actions.",
-     "tools": "Manual adversarial prompts targeting tool descriptions
-Test permission boundaries",
+     "tools": "Manual adversarial prompts targeting tool descriptions\nTest permission boundaries",
      "tags": ["ai", "llm", "agent", "tool-abuse"], "engagement_types": ["AI Red Team"]},
 
     # ── Reporting & Wrap-up ────────────────────────────────────────────────────
     {"title": "Screenshot Evidence Collection", "category": "Reporting", "priority": "High",
      "description": "Collect and organize screenshots, PoC output, and evidence for all findings.",
-     "tools": "Flameshot / Greenshot for screenshots
-Terminal output capture
-Video PoC for complex findings",
+     "tools": "Flameshot / Greenshot for screenshots\nTerminal output capture\nVideo PoC for complex findings",
      "tags": ["reporting"], "engagement_types": ["Web App", "Network", "Red Team", "Cloud", "AI Red Team"]},
 
     {"title": "Draft Executive Summary", "category": "Reporting", "priority": "High",
@@ -389,8 +337,7 @@ Video PoC for complex findings",
 
     {"title": "Verify Remediation", "category": "Reporting", "priority": "Medium",
      "description": "Re-test all remediated findings to confirm fixes are effective.",
-     "tools": "Repeat original PoC steps
-Update finding status in RedTrack",
+     "tools": "Repeat original PoC steps\nUpdate finding status in RedTrack",
      "tags": ["reporting", "remediation"], "engagement_types": ["Web App", "Network", "Red Team", "Cloud"]},
 ]
 
