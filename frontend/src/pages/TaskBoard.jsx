@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import api from '../api/client'
 import toast from 'react-hot-toast'
@@ -15,6 +16,7 @@ const PRIORITIES = ['Low', 'Medium', 'High', 'Critical']
 const PRIORITY_COLOR = { Low: '#60a5fa', Medium: '#f0883e', High: '#e05252', Critical: '#a855f7' }
 
 export default function TaskBoard({ engagementId }) {
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const [showModal, setShowModal] = useState(false)
   const [expandedTask, setExpandedTask] = useState(null)
@@ -82,7 +84,10 @@ export default function TaskBoard({ engagementId }) {
             </>
           )}
         </div>
-        <button style={s.btnPrimary} onClick={() => setShowModal(true)}>+ Add Task</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={s.btn} onClick={() => navigate('/task-library')}>📚 Browse Library</button>
+          <button style={s.btnPrimary} onClick={() => setShowModal(true)}>+ Add Task</button>
+        </div>
       </div>
 
       {tasks.length === 0 ? (

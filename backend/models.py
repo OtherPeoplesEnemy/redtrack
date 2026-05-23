@@ -294,6 +294,34 @@ class EngagementTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
+
+class Integration(Base):
+    """Platform integration settings (Slack, Jira, etc.)"""
+    __tablename__ = "integrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # slack, jira, email
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TaskTemplate(Base):
+    """Reusable task templates for the Task Library."""
+    __tablename__ = "task_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    engagement_types: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
+    priority: Mapped[str] = mapped_column(String(20), default="Medium")
+    tools: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    references: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
 class VulnTemplate(Base):
     __tablename__ = "vuln_templates"
 

@@ -14,6 +14,8 @@ import Reports from './pages/Reports'
 import VulnDB from './pages/VulnDB'
 import Kanban from './pages/Kanban'
 import Settings from './pages/Settings'
+import Integrations from './pages/Integrations'
+import TaskLibrary from './pages/TaskLibrary'
 import Login from './pages/Login'
 import AIAssistant from './components/AIAssistant'
 import { useState } from 'react'
@@ -30,6 +32,8 @@ const NAV = [
   { to: '/reports', label: 'Reports', icon: '◧' },
   { to: '/vulndb', label: 'Vuln DB', icon: '◫' },
   { to: '/settings', label: 'Settings', icon: '◎' },
+  { to: '/integrations', label: 'Integrations', icon: '⟳' },
+  { to: '/task-library', label: 'Task Library', icon: '✓' },
 ]
 
 function ThemeToggle() {
@@ -147,6 +151,8 @@ export default function App() {
                       <Route path="/reports" element={<Reports />} />
                       <Route path="/vulndb" element={<VulnDB />} />
                       <Route path="/settings" element={<Settings />} />
+                      <Route path="/integrations" element={<Integrations />} />
+                      <Route path="/task-library" element={<TaskLibrary />} />
                     </Routes>
                   </AppShell>
                 </ProtectedRoute>

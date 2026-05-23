@@ -21,7 +21,7 @@ from config import get_settings
 from database import create_tables, get_db
 from models import (
     User, Engagement, Finding, Evidence, Comment, Report,
-    VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration,
+    VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
     Severity, FindingStatus, EngagementStatus, UserRole
 )
 from auth import (
@@ -1338,6 +1338,115 @@ async def slack_slash_command(request: Request, db: AsyncSession = Depends(get_d
 
     response = await handle_slash_command(command, text, engs, findings, base_url)
     return response
+
+
+# ─── Task Library ─────────────────────────────────────────────────────────────
+
+@app.get("/task-library/")
+async def list_task_templates(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    engagement_type: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    q = select(TaskTemplate).order_by(TaskTemplate.category, TaskTemplate.title)
+    if search:
+        q = q.where(TaskTemplate.title.ilike(f"%{search}%") | TaskTemplate.description.ilike(f"%{search}%"))
+    if category:
+        q = q.where(TaskTemplate.category == category)
+    result = await db.execute(q)
+    templates = result.scalars().all()
+    if engagement_type:
+        templates = [t for t in templates if not t.engagement_types or engagement_type in (t.engagement_types or [])]
+    return [_task_template_out(t) for t in templates]
+
+
+@app.post("/task-library/", status_code=201)
+async def create_task_template(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    template = TaskTemplate(
+        title=body["title"],
+        description=body.get("description"),
+        category=body.get("category", "Custom"),
+        priority=body.get("priority", "Medium"),
+        tools=body.get("tools"),
+        references=body.get("references"),
+        engagement_types=body.get("engagement_types", []),
+        tags=body.get("tags", []),
+    )
+    db.add(template)
+    await db.flush()
+    return _task_template_out(template)
+
+
+@app.post("/task-library/{template_id}/import/{engagement_id}", status_code=201)
+async def import_task_template(
+    template_id: uuid.UUID,
+    engagement_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_tester_or_above)
+):
+    t = (await db.execute(select(TaskTemplate).where(TaskTemplate.id == template_id))).scalar_one_or_none()
+    if not t:
+        raise HTTPException(404, "Template not found")
+    task = EngagementTask(
+        engagement_id=engagement_id,
+        title=t.title,
+        description=f"{t.description or ''}\n\n**Tools:**\n{t.tools or ''}".strip(),
+        status="Todo",
+        priority=t.priority,
+        created_by_id=current_user.id,
+    )
+    db.add(task)
+    await db.flush()
+    return _task_out(task)
+
+
+@app.delete("/task-library/{template_id}", status_code=204)
+async def delete_task_template(template_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    t = (await db.execute(select(TaskTemplate).where(TaskTemplate.id == template_id))).scalar_one_or_none()
+    if t:
+        await db.delete(t)
+
+
+@app.post("/task-library/ai-generate", status_code=201)
+async def ai_generate_task(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Use AI to generate a task template."""
+    import json
+    prompt = f"""Generate a penetration testing task template for: "{body.get('prompt', '')}"
+
+Respond ONLY with a JSON object (no markdown):
+{{
+  "title": "task name",
+  "category": "one of: Recon & OSINT, Web Application, Network & Internal, Cloud Security, AI Red Team, Reporting, Custom",
+  "priority": "Critical|High|Medium|Low",
+  "description": "what needs to be done and why",
+  "tools": "specific commands and tools to use",
+  "references": "relevant links or standards",
+  "tags": ["tag1", "tag2"],
+  "engagement_types": ["Web App", "Network", etc]
+}}"""
+
+    try:
+        import ai_service
+        content = ai_service._get_ai_response(prompt, max_tokens=600)
+        clean = content.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+        template = TaskTemplate(**{k: v for k, v in parsed.items() if hasattr(TaskTemplate, k)})
+        db.add(template)
+        await db.flush()
+        return _task_template_out(template)
+    except Exception as e:
+        raise HTTPException(500, f"AI generation failed: {e}")
+
+
+def _task_template_out(t):
+    return {
+        "id": str(t.id), "title": t.title, "description": t.description,
+        "category": t.category, "priority": t.priority, "tools": t.tools,
+        "references": t.references, "engagement_types": t.engagement_types,
+        "tags": t.tags, "created_at": str(t.created_at),
+    }
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
 
