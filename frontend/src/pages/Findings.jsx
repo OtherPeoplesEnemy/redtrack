@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { useNavigate } from 'react-router-dom'
 import { findingsApi, engagementsApi } from '../api/client'
 import toast from 'react-hot-toast'
+import MarkdownEditor from '../components/MarkdownEditor'
 
 const SEV_COLOR = { Critical: '#e05252', High: '#f0883e', Medium: '#fbbf24', Low: '#60a5fa', Info: '#6b7899' }
 const SEV_DIM = { Critical: 'var(--red-dim)', High: 'var(--amber-dim)', Medium: '#3d3010', Low: 'var(--blue-dim)', Info: 'var(--surface3)' }
@@ -110,7 +111,7 @@ export default function Findings() {
       </div>
 
       {showModal && (
-        <div style={s.modalBg} onClick={e => e.target === e.currentTarget && setShowModal(false)}>
+        <div style={s.modalBg}>
           <div style={s.modal}>
             <div style={s.modalHeader}>
               <span style={s.modalTitle}>New Finding</span>
@@ -150,11 +151,11 @@ export default function Findings() {
               </div>
               <div style={{ marginBottom: 12 }}>
                 <label style={s.label}>Description</label>
-                <textarea style={{ ...s.formInput, minHeight: 80, resize: 'vertical' }} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
+                <MarkdownEditor value={form.description} onChange={v => setForm({ ...form, description: v })} minHeight={80} placeholder="Describe the vulnerability in markdown..." />
               </div>
               <div style={{ marginBottom: 16 }}>
                 <label style={s.label}>Remediation</label>
-                <textarea style={{ ...s.formInput, minHeight: 60, resize: 'vertical' }} value={form.remediation} onChange={e => setForm({ ...form, remediation: e.target.value })} />
+                <MarkdownEditor value={form.remediation} onChange={v => setForm({ ...form, remediation: v })} minHeight={60} placeholder="Remediation steps in markdown..." />
               </div>
               <div style={{ marginBottom: 16 }}>
                 <label style={s.label}>Evidence / Screenshots</label>

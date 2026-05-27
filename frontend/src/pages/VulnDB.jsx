@@ -394,7 +394,7 @@ Respond ONLY with a JSON object (no markdown, no backticks):
 
       {/* Import modal */}
       {showImport && selected && (
-        <div style={s.modalBg} onClick={e => e.target === e.currentTarget && setShowImport(false)}>
+        <div style={s.modalBg} >
           <div style={s.modal}>
             <div style={s.modalHeader}>
               <span style={s.modalTitle}>Import to Engagement</span>

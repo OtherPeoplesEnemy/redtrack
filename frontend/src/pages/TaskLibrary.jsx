@@ -183,7 +183,7 @@ export default function TaskLibrary() {
 
       {/* Import modal */}
       {showImport && selected && (
-        <div style={s.modalBg} onClick={e => e.target === e.currentTarget && setShowImport(false)}>
+        <div style={s.modalBg} >
           <div style={s.modal}>
             <div style={s.modalHeader}>
               <span style={s.modalTitle}>Import Task to Engagement</span>
@@ -216,7 +216,7 @@ export default function TaskLibrary() {
 
       {/* Create template modal */}
       {showCreate && (
-        <div style={s.modalBg} onClick={e => e.target === e.currentTarget && setShowCreate(false)}>
+        <div style={s.modalBg} >
           <div style={{ ...s.modal, maxWidth: 560, maxHeight: '85vh', overflowY: 'auto' }}>
             <div style={s.modalHeader}>
               <span style={s.modalTitle}>Create Task Template</span>

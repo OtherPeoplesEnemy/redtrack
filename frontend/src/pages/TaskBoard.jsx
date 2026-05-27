@@ -136,7 +136,7 @@ export default function TaskBoard({ engagementId }) {
 
       {/* Create task modal */}
       {showModal && (
-        <div style={s.modalBg} onClick={e => e.target === e.currentTarget && setShowModal(false)}>
+        <div style={s.modalBg} >
           <div style={s.modal}>
             <div style={s.modalHeader}>
               <span style={s.modalTitle}>New Task</span>

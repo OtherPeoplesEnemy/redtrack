@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { findingsApi, aiApi } from '../api/client'
+import CVSSCalculator from '../components/CVSSCalculator'
+import MarkdownEditor from '../components/MarkdownEditor'
 import api from '../api/client'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
@@ -23,6 +25,7 @@ export default function FindingDetail() {
   const [aiRemLoading, setAiRemLoading] = useState(false)
   const [aiStepsLoading, setAiStepsLoading] = useState(false)
   const [saveLoading, setSaveLoading] = useState(false)
+  const [showCVSS, setShowCVSS] = useState(false)
 
   const { data: finding, isLoading } = useQuery(['finding', id], () => findingsApi.get(id).then(r => r.data))
   const { data: evidence = [] } = useQuery(['evidence', id], () => findingsApi.listEvidence(id).then(r => r.data))
@@ -186,15 +189,35 @@ export default function FindingDetail() {
                 </select>
               </div>
               <div style={s.field}>
-                <div style={s.fieldLabel}>CVSS Score</div>
-                {editField === 'cvss_score'
-                  ? <div style={{ display: 'flex', gap: 6 }}>
-                      <input style={s.input} value={editVal} onChange={e => setEditVal(e.target.value)} type="number" min="0" max="10" step="0.1" autoFocus />
-                      <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ cvss_score: parseFloat(editVal) })}>Save</button>
-                      <button style={s.btn} onClick={() => setEditField(null)}>✕</button>
-                    </div>
-                  : <div style={s.fieldValue} onClick={() => startEdit('cvss_score', finding.cvss_score)}>{finding.cvss_score || <span style={{ color: 'var(--muted2)' }}>Click to edit</span>}</div>
-                }
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={s.fieldLabel}>CVSS Score</div>
+                  <button style={{ ...s.btn, fontSize: 10, padding: '2px 8px' }} onClick={() => setShowCVSS(!showCVSS)}>
+                    {showCVSS ? '✕ Close' : '⊕ CVSS Calculator'}
+                  </button>
+                </div>
+                {showCVSS ? (
+                  <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: 16 }}>
+                    <CVSSCalculator
+                      initialVector={finding.cvss_vector}
+                      onApply={(score, vector, severity) => {
+                        updateMutation.mutate({ cvss_score: score, cvss_vector: vector, severity })
+                        setShowCVSS(false)
+                      }}
+                    />
+                  </div>
+                ) : (
+                  editField === 'cvss_score'
+                    ? <div style={{ display: 'flex', gap: 6 }}>
+                        <input style={s.input} value={editVal} onChange={e => setEditVal(e.target.value)} type="number" min="0" max="10" step="0.1" autoFocus />
+                        <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ cvss_score: parseFloat(editVal) })}>Save</button>
+                        <button style={s.btn} onClick={() => setEditField(null)}>✕</button>
+                      </div>
+                    : <div style={s.fieldValue} onClick={() => startEdit('cvss_score', finding.cvss_score)}>
+                        {finding.cvss_score
+                          ? <span>{finding.cvss_score} <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'monospace' }}>{finding.cvss_vector}</span></span>
+                          : <span style={{ color: 'var(--muted2)' }}>Click to edit or use CVSS Calculator</span>}
+                      </div>
+                )}
               </div>
             </div>
 
@@ -203,16 +226,21 @@ export default function FindingDetail() {
               ['impact', 'Impact', finding.impact],
             ].map(([field, label, val]) => (
               <div key={field} style={s.field}>
-                <div style={s.fieldLabel}>{label}</div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={s.fieldLabel}>{label}</div>
+                  {editField !== field && <button style={{ ...s.btn, fontSize: 10, padding: '2px 8px' }} onClick={() => startEdit(field, val)}>Edit</button>}
+                </div>
                 {editField === field
                   ? <div>
-                      <textarea style={{ ...s.input, minHeight: 100, width: '100%', resize: 'vertical' }} value={editVal} onChange={e => setEditVal(e.target.value)} autoFocus />
-                      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} placeholder={`Write ${label.toLowerCase()} in markdown...`} />
+                      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                         <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ [field]: editVal })}>Save</button>
                         <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
                       </div>
                     </div>
-                  : <div style={{ ...s.fieldValue, whiteSpace: 'pre-wrap', minHeight: 40 }} onClick={() => startEdit(field, val)}>{val || <span style={{ color: 'var(--muted2)' }}>Click to edit</span>}</div>
+                  : <div style={{ fontSize: 12, color: val ? 'var(--text)' : 'var(--muted2)', lineHeight: 1.6, minHeight: 24 }}>
+                      {val ? <ReactMarkdown>{val}</ReactMarkdown> : 'Click Edit to add content'}
+                    </div>
                 }
               </div>
             ))}
@@ -224,7 +252,7 @@ export default function FindingDetail() {
               </div>
               {editField === 'steps_to_reproduce'
                 ? <div>
-                    <textarea style={{ ...s.input, minHeight: 120, width: '100%', resize: 'vertical' }} value={editVal} onChange={e => setEditVal(e.target.value)} autoFocus />
+                    <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} />
                     <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                       <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ steps_to_reproduce: editVal })}>Save</button>
                       <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
@@ -241,7 +269,7 @@ export default function FindingDetail() {
               </div>
               {editField === 'remediation'
                 ? <div>
-                    <textarea style={{ ...s.input, minHeight: 120, width: '100%', resize: 'vertical' }} value={editVal} onChange={e => setEditVal(e.target.value)} autoFocus />
+                    <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} />
                     <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                       <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ remediation: editVal })}>Save</button>
                       <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
