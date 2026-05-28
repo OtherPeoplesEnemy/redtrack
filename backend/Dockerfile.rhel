@@ -1,0 +1,25 @@
+# RedTrack Backend — Red Hat Hardened Python 3.12
+# Requires Red Hat subscription: docker login registry.redhat.io
+FROM registry.redhat.io/hi/python-312:latest
+
+WORKDIR /app
+
+USER root
+RUN microdnf install -y \
+    gcc \
+    libffi-devel \
+    openssl-devel \
+    libreoffice-writer \
+    libreoffice-calc \
+    && microdnf clean all
+
+USER 1001
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN mkdir -p /app/uploads
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

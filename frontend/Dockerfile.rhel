@@ -1,0 +1,12 @@
+# RedTrack Frontend — Red Hat Hardened Node.js 20
+# Requires Red Hat subscription: docker login registry.redhat.io
+FROM registry.redhat.io/hi/nodejs-20:latest
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm install
+COPY . .
+
+EXPOSE 5173
+CMD ["npm", "run", "dev"]
