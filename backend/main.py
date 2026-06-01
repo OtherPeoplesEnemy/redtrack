@@ -1486,3 +1486,82 @@ async def websocket_endpoint(websocket: WebSocket, engagement_id: str):
             await manager.broadcast(data, engagement_id, sender=websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket, engagement_id)
+# Add these routes to main.py — Team Management
+
+@app.get("/engagements/{engagement_id}/members")
+async def list_members(engagement_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(
+        select(EngagementMember, User)
+        .join(User, EngagementMember.user_id == User.id)
+        .where(EngagementMember.engagement_id == engagement_id)
+    )
+    rows = result.all()
+    members = []
+    for member, user in rows:
+        # Count findings by this user in this engagement
+        finding_count = await db.scalar(
+            select(func.count(Finding.id)).where(
+                Finding.engagement_id == engagement_id,
+                Finding.tester_id == user.id
+            )
+        ) or 0
+        members.append({
+            "user_id": str(user.id),
+            "username": user.username,
+            "full_name": user.full_name,
+            "email": user.email,
+            "role": member.role,
+            "finding_count": finding_count,
+            "joined_at": str(member.joined_at) if hasattr(member, 'joined_at') and member.joined_at else None,
+        })
+    return members
+
+
+@app.post("/engagements/{engagement_id}/members", status_code=201)
+async def add_member(engagement_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    user_id = uuid.UUID(body["user_id"])
+    # Check not already a member
+    existing = await db.execute(
+        select(EngagementMember).where(
+            EngagementMember.engagement_id == engagement_id,
+            EngagementMember.user_id == user_id
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "User is already a member of this engagement")
+    member = EngagementMember(
+        engagement_id=engagement_id,
+        user_id=user_id,
+        role=body.get("role", "tester")
+    )
+    db.add(member)
+    await db.flush()
+    return {"message": "Member added"}
+
+
+@app.patch("/engagements/{engagement_id}/members/{user_id}")
+async def update_member_role(engagement_id: uuid.UUID, user_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    result = await db.execute(
+        select(EngagementMember).where(
+            EngagementMember.engagement_id == engagement_id,
+            EngagementMember.user_id == user_id
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(404, "Member not found")
+    member.role = body.get("role", member.role)
+    return {"message": "Role updated"}
+
+
+@app.delete("/engagements/{engagement_id}/members/{user_id}", status_code=204)
+async def remove_member(engagement_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    result = await db.execute(
+        select(EngagementMember).where(
+            EngagementMember.engagement_id == engagement_id,
+            EngagementMember.user_id == user_id
+        )
+    )
+    member = result.scalar_one_or_none()
+    if member:
+        await db.delete(member)

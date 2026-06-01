@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { engagementsApi, findingsApi, reconApi, reportsApi, aiApi } from '../api/client'
 import MitreBoard from './MitreBoard'
+import EngagementTeam from './EngagementTeam'
 import EngagementReports from '../components/EngagementReports'
 import TaskBoard from './TaskBoard'
 import toast from 'react-hot-toast'
@@ -686,7 +687,7 @@ export default function EngagementDetail() {
           <div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>Team members assigned to this engagement. Manage via Settings → Users.</div>
             <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: 20, textAlign: 'center', color: 'var(--muted)' }}>
-              Team management coming in next release. Use the API to assign members.
+              <EngagementTeam engagementId={id} />
             </div>
           </div>
         )}
