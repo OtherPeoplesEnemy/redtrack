@@ -1,6 +1,6 @@
 # RedTrack Frontend — Red Hat Hardened Node.js 20
-# Requires Red Hat subscription: docker login registry.redhat.io
-FROM registry.redhat.io/hi/nodejs-20:latest
+# Requires Red Hat subscription: docker login registry.access.redhat.com
+FROM registry.access.redhat.com/hi/nodejs:20.20.2
 
 WORKDIR /app
 

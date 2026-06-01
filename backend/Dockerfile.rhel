@@ -1,6 +1,6 @@
 # RedTrack Backend — Red Hat Hardened Python 3.12
-# Requires Red Hat subscription: docker login registry.redhat.io
-FROM registry.redhat.io/hi/python-312:latest
+# Requires Red Hat subscription: docker login registry.access.redhat.com
+FROM registry.access.redhat.com/hi/python:3.12.13
 
 WORKDIR /app
 
