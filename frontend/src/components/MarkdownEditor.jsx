@@ -1,15 +1,86 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { findingsApi } from '../api/client'
+import toast from 'react-hot-toast'
 
-export default function MarkdownEditor({ value, onChange, placeholder, minHeight = 120 }) {
-  const [mode, setMode] = useState('edit') // edit | preview | split
+export default function MarkdownEditor({ value, onChange, placeholder, minHeight = 120, findingId }) {
+  const [mode, setMode] = useState('edit')
+  const [uploading, setUploading] = useState(false)
+  const textareaRef = useRef(null)
+
+  async function uploadImage(file) {
+    if (!findingId) {
+      toast.error('Save the finding first before adding images')
+      return null
+    }
+    if (!file.type.startsWith('image/')) {
+      toast.error('Only images can be pasted inline — use Evidence tab for other files')
+      return null
+    }
+    setUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const { data } = await findingsApi.uploadEvidence(findingId, fd)
+      const token = localStorage.getItem('access_token')
+      return `/api/findings/evidence/${data.id}/file?token=${token}`
+    } catch {
+      toast.error('Image upload failed')
+      return null
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  function insertAtCursor(text) {
+    const ta = textareaRef.current
+    if (!ta) {
+      onChange((value || '') + '\n' + text)
+      return
+    }
+    const start = ta.selectionStart
+    const end = ta.selectionEnd
+    const newVal = value.slice(0, start) + text + value.slice(end)
+    onChange(newVal)
+    setTimeout(() => {
+      ta.selectionStart = ta.selectionEnd = start + text.length
+      ta.focus()
+    }, 0)
+  }
+
+  async function handlePaste(e) {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault()
+        const file = item.getAsFile()
+        const url = await uploadImage(file)
+        if (url) insertAtCursor(`\n![screenshot](${url})\n`)
+        return
+      }
+    }
+  }
+
+  async function handleDrop(e) {
+    e.preventDefault()
+    const file = e.dataTransfer.files[0]
+    if (!file) return
+    if (file.type.startsWith('image/')) {
+      const url = await uploadImage(file)
+      if (url) insertAtCursor(`\n![${file.name}](${url})\n`)
+    }
+  }
+
+  function handleDragOver(e) {
+    e.preventDefault()
+  }
 
   return (
     <div style={s.container}>
       {/* Toolbar */}
       <div style={s.toolbar}>
         <div style={s.toolbarLeft}>
-          {/* Format buttons */}
           {[
             ['B', '**text**', 'Bold'],
             ['I', '_text_', 'Italic'],
@@ -21,11 +92,12 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
             ['1.', '1. item', 'Numbered list'],
           ].map(([label, insert, title]) => (
             <button key={label} title={title} style={s.fmtBtn}
-              onClick={() => {
-                const textarea = document.activeElement
-                if (textarea && textarea.tagName === 'TEXTAREA') {
-                  const start = textarea.selectionStart
-                  const end = textarea.selectionEnd
+              onMouseDown={e => {
+                e.preventDefault()
+                const ta = textareaRef.current
+                if (ta) {
+                  const start = ta.selectionStart
+                  const end = ta.selectionEnd
                   const selected = value.slice(start, end)
                   let newText
                   if (selected && label === 'B') newText = `**${selected}**`
@@ -34,6 +106,7 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
                   else newText = insert.replace('text', selected || 'text')
                   const newVal = value.slice(0, start) + newText + value.slice(end)
                   onChange(newVal)
+                  setTimeout(() => { ta.selectionStart = ta.selectionEnd = start + newText.length; ta.focus() }, 0)
                 } else {
                   onChange((value || '') + '\n' + insert)
                 }
@@ -41,6 +114,21 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
               {label}
             </button>
           ))}
+
+          {/* Image upload button */}
+          {findingId && (
+            <label title="Upload image" style={{ ...s.fmtBtn, cursor: 'pointer', color: uploading ? 'var(--muted2)' : 'var(--muted)', display: 'inline-flex', alignItems: 'center' }}>
+              {uploading ? '⏳' : '🖼'}
+              <input type="file" accept="image/*" style={{ display: 'none' }}
+                onChange={async e => {
+                  const file = e.target.files[0]
+                  if (file) {
+                    const url = await uploadImage(file)
+                    if (url) insertAtCursor(`\n![${file.name}](${url})\n`)
+                  }
+                }} />
+            </label>
+          )}
         </div>
         <div style={s.toolbarRight}>
           {['edit', 'split', 'preview'].map(m => (
@@ -56,10 +144,14 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
       <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border2)', borderTop: 'none', borderRadius: '0 0 6px 6px', overflow: 'hidden' }}>
         {(mode === 'edit' || mode === 'split') && (
           <textarea
+            ref={textareaRef}
             style={{ ...s.textarea, minHeight, flex: mode === 'split' ? '0 0 50%' : 1, borderRight: mode === 'split' ? '1px solid var(--border)' : 'none' }}
             value={value || ''}
             onChange={e => onChange(e.target.value)}
-            placeholder={placeholder || 'Write in markdown...'}
+            onPaste={handlePaste}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            placeholder={uploading ? 'Uploading image...' : (placeholder || 'Write in markdown... Paste or drop images directly')}
           />
         )}
         {(mode === 'preview' || mode === 'split') && (
@@ -67,6 +159,11 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
             {value ? (
               <ReactMarkdown
                 components={{
+                  img: ({ src, alt }) => (
+                    <img src={src} alt={alt}
+                      style={{ maxWidth: '100%', borderRadius: 6, border: '1px solid var(--border)', margin: '8px 0', cursor: 'pointer' }}
+                      onClick={() => window.open(src, '_blank')} />
+                  ),
                   code: ({ node, inline, children, ...props }) => (
                     inline
                       ? <code style={{ background: 'var(--surface3)', padding: '1px 5px', borderRadius: 3, fontFamily: 'monospace', fontSize: '0.9em' }}>{children}</code>
@@ -98,7 +195,9 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
       </div>
 
       <div style={{ fontSize: 9, color: 'var(--muted2)', marginTop: 4 }}>
-        Supports **bold**, _italic_, `code`, ```code blocks```, ## headings, - lists, | tables |
+        {findingId
+          ? 'Paste or drop images directly · **bold** _italic_ `code` ``` blocks ``` ## headings'
+          : '**bold** _italic_ `code` ``` code blocks ``` ## headings - lists'}
       </div>
     </div>
   )
@@ -107,7 +206,7 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
 const s = {
   container: { display: 'flex', flexDirection: 'column' },
   toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--surface2)', border: '1px solid var(--border2)', borderRadius: '6px 6px 0 0', padding: '4px 8px', flexWrap: 'wrap', gap: 4 },
-  toolbarLeft: { display: 'flex', gap: 2, flexWrap: 'wrap' },
+  toolbarLeft: { display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' },
   toolbarRight: { display: 'flex', gap: 2 },
   fmtBtn: { background: 'none', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--muted)', padding: '2px 7px', fontSize: 11, cursor: 'pointer', fontFamily: 'monospace', fontWeight: 700 },
   modeBtn: { border: '1px solid transparent', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer', fontFamily: 'monospace' },
