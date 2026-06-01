@@ -711,6 +711,14 @@ async def create_finding_direct(engagement_id: uuid.UUID, body: dict, db: AsyncS
     ref_id = f"F-{str(count + 1).zfill(3)}"
     allowed = ["title", "severity", "cvss_score", "cvss_vector", "cwe", "cve", "affected_component", "description", "impact", "remediation", "references", "source", "tags"]
     data = {k: v for k, v in body.items() if k in allowed}
+    if isinstance(data.get("references"), list):
+        data["references"] = "\n".join(data["references"])
+    if isinstance(data.get("tags"), str):
+        data["tags"] = [data["tags"]]
+    if data.get("cwe") and len(data["cwe"]) > 50:
+        data["cwe"] = data["cwe"][:50]
+    if data.get("cvss_vector") and len(data["cvss_vector"]) > 200:
+        data["cvss_vector"] = data["cvss_vector"][:200]
     finding = Finding(**data, engagement_id=engagement_id, tester_id=current_user.id, ref_id=ref_id)
     db.add(finding)
     await db.flush()
