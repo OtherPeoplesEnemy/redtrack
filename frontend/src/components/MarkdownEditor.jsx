@@ -22,8 +22,7 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
       const fd = new FormData()
       fd.append('file', file)
       const { data } = await findingsApi.uploadEvidence(findingId, fd)
-      const token = localStorage.getItem('access_token')
-      return `/api/findings/evidence/${data.id}/file?token=${token}`
+      return `/api/findings/evidence/${data.id}/file`
     } catch {
       toast.error('Image upload failed')
       return null
