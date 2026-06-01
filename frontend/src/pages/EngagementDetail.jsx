@@ -3,13 +3,15 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { engagementsApi, findingsApi, reconApi, reportsApi, aiApi } from '../api/client'
 import MitreBoard from './MitreBoard'
+import EngagementJumpBoxes from '../components/EngagementJumpBoxes'
 import EngagementTeam from './EngagementTeam'
 import EngagementReports from '../components/EngagementReports'
+
 import TaskBoard from './TaskBoard'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 
-const TABS = ['Overview', 'Scope', 'Recon', 'Findings', 'Tasks', 'Notes', 'Team', 'Reports', 'MITRE']
+const TABS = ['Overview', 'Scope', 'Recon', 'Findings', 'Tasks', 'Notes', 'Team', 'Jump Boxes', 'Reports', 'MITRE']
 const AI_TABS = ['Overview', 'Scope', 'Recon', 'Kill Chain', 'Findings', 'Tasks', 'Notes', 'Team', 'Reports', 'MITRE ATLAS']
 
 const SEV_COLOR = { Critical: '#e05252', High: '#f0883e', Medium: '#fbbf24', Low: '#60a5fa', Info: '#6b7899' }
@@ -691,7 +693,12 @@ export default function EngagementDetail() {
             </div>
           </div>
         )}
-
+        {/* ── Jump Boxes ── */}
+        {tab === 'Jump Boxes' && (
+          <div>
+            <EngagementJumpBoxes engagementId={id} />
+          </div>
+        )}
         {/* ── Reports ── */}
         {tab === 'Reports' && (
           <EngagementReports engagementId={id} engagementObj={eng} />

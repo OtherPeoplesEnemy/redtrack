@@ -20,6 +20,7 @@ import hmac
 from config import get_settings
 from database import create_tables, get_db
 from models import (
+    JumpBox,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
     Severity, FindingStatus, EngagementStatus, UserRole
@@ -1565,3 +1566,129 @@ async def remove_member(engagement_id: uuid.UUID, user_id: uuid.UUID, db: AsyncS
     member = result.scalar_one_or_none()
     if member:
         await db.delete(member)
+# ─── Jump Box Routes (add to main.py) ────────────────────────────────────────
+
+@app.get("/jumpboxes/")
+async def list_jumpboxes(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(JumpBox).order_by(JumpBox.name))
+    boxes = result.scalars().all()
+    return [await _jumpbox_out(box, db) for box in boxes]
+
+
+@app.post("/jumpboxes/", status_code=201)
+async def create_jumpbox(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    box = JumpBox(
+        name=body["name"],
+        hostname=body.get("hostname"),
+        ip_address=body.get("ip_address"),
+        os=body.get("os", "Kali Linux"),
+        location=body.get("location", "Internal"),
+        purpose=body.get("purpose"),
+        notes=body.get("notes"),
+        auto_release_hours=body.get("auto_release_hours", 8),
+    )
+    db.add(box)
+    await db.flush()
+    return await _jumpbox_out(box, db)
+
+
+@app.patch("/jumpboxes/{box_id}")
+async def update_jumpbox(box_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    result = await db.execute(select(JumpBox).where(JumpBox.id == box_id))
+    box = result.scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    for k, v in body.items():
+        if hasattr(box, k) and k not in ['id', 'created_at']:
+            setattr(box, k, v)
+    return await _jumpbox_out(box, db)
+
+
+@app.delete("/jumpboxes/{box_id}", status_code=204)
+async def delete_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    result = await db.execute(select(JumpBox).where(JumpBox.id == box_id))
+    box = result.scalar_one_or_none()
+    if box:
+        await db.delete(box)
+
+
+@app.post("/jumpboxes/{box_id}/checkout")
+async def checkout_jumpbox(box_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    result = await db.execute(select(JumpBox).where(JumpBox.id == box_id))
+    box = result.scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    if box.status == "checked_out":
+        raise HTTPException(400, f"Jump box is already checked out")
+    box.status = "checked_out"
+    box.checked_out_by_id = current_user.id
+    box.checked_out_at = datetime.now(timezone.utc)
+    box.checkout_notes = body.get("notes")
+    if body.get("engagement_id"):
+        box.checked_out_engagement_id = uuid.UUID(body["engagement_id"])
+    # Slack notification
+    try:
+        from slack_service import send_slack_message
+        integ = await _get_integration("slack", db)
+        if integ and integ.enabled and integ.config.get("webhook_url"):
+            base_url = integ.config.get("base_url", "")
+            await send_slack_message(integ.config["webhook_url"], {
+                "text": f"🖥 *{box.name}* checked out by @{current_user.username}" + (f" for engagement" if body.get("engagement_id") else "")
+            })
+    except Exception:
+        pass
+    return await _jumpbox_out(box, db)
+
+
+@app.post("/jumpboxes/{box_id}/checkin")
+async def checkin_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    result = await db.execute(select(JumpBox).where(JumpBox.id == box_id))
+    box = result.scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    box.status = "available"
+    box.checked_out_by_id = None
+    box.checked_out_at = None
+    box.checkout_notes = None
+    box.checked_out_engagement_id = None
+    # Slack notification
+    try:
+        from slack_service import send_slack_message
+        integ = await _get_integration("slack", db)
+        if integ and integ.enabled and integ.config.get("webhook_url"):
+            await send_slack_message(integ.config["webhook_url"], {
+                "text": f"🖥 *{box.name}* checked in by @{current_user.username} — now available"
+            })
+    except Exception:
+        pass
+    return await _jumpbox_out(box, db)
+
+
+async def _jumpbox_out(box, db):
+    checked_out_by_username = None
+    if box.checked_out_by_id:
+        user = (await db.execute(select(User).where(User.id == box.checked_out_by_id))).scalar_one_or_none()
+        if user:
+            checked_out_by_username = user.username
+    checked_out_engagement = None
+    if box.checked_out_engagement_id:
+        eng = (await db.execute(select(Engagement).where(Engagement.id == box.checked_out_engagement_id))).scalar_one_or_none()
+        if eng:
+            checked_out_engagement = f"{eng.ref_id} — {eng.client}"
+    return {
+        "id": str(box.id),
+        "name": box.name,
+        "hostname": box.hostname,
+        "ip_address": box.ip_address,
+        "os": box.os,
+        "location": box.location,
+        "purpose": box.purpose,
+        "notes": box.notes,
+        "status": box.status,
+        "checked_out_by_username": checked_out_by_username,
+        "checked_out_engagement_id": str(box.checked_out_engagement_id) if box.checked_out_engagement_id else None,
+        "checked_out_engagement": checked_out_engagement,
+        "checked_out_at": str(box.checked_out_at) if box.checked_out_at else None,
+        "checkout_notes": box.checkout_notes,
+        "auto_release_hours": box.auto_release_hours,
+    }

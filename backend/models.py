@@ -322,6 +322,26 @@ class TaskTemplate(Base):
     tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+
+class JumpBox(Base):
+    __tablename__ = "jumpboxes"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    hostname: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    os: Mapped[str] = mapped_column(String(100), default="Kali Linux")
+    location: Mapped[str] = mapped_column(String(100), default="Internal")
+    purpose: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="available")
+    checked_out_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    checked_out_engagement_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("engagements.id"), nullable=True)
+    checked_out_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    checkout_notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    auto_release_hours: Mapped[int] = mapped_column(default=8)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class VulnTemplate(Base):
     __tablename__ = "vuln_templates"
 
