@@ -10,7 +10,7 @@ export default function MarkdownEditor({ value, onChange, placeholder, minHeight
 
   async function uploadImage(file) {
     if (!findingId) {
-      toast.error('Save the finding first before adding images')
+       toast.error(`No finding ID — received: ${findingId}`)
       return null
     }
     if (!file.type.startsWith('image/')) {
