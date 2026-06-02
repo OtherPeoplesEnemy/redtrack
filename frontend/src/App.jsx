@@ -15,6 +15,7 @@ import Settings from './pages/Settings'
 import Integrations from './pages/Integrations'
 import TaskLibrary from './pages/TaskLibrary'
 import Management from './pages/Management'
+import Resources from './pages/Resources'
 import Kanban from './pages/Kanban'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } })
@@ -24,6 +25,7 @@ const NAV = [
   { to: '/engagements', label: 'Engagements', icon: '◈' },
   { to: '/kanban', label: 'Kanban', icon: '⊞' },
   { to: '/management', label: 'Management', icon: '◎' },
+  { to: '/resources', label: 'Resources', icon: '🖥' },
   { to: '/findings', label: 'Findings', icon: '⚑' },
   { to: '/vulndb', label: 'Vuln DB', icon: '◉' },
   { to: '/task-library', label: 'Task Library', icon: '✓' },
@@ -103,7 +105,8 @@ function AppRoutes() {
       <Route path="/engagements" element={<ProtectedRoute><Engagements /></ProtectedRoute>} />
       <Route path="/engagements/:id" element={<ProtectedRoute><EngagementDetail /></ProtectedRoute>} />
       <Route path="/kanban" element={<ProtectedRoute><Kanban /></ProtectedRoute>} />
-      <Route path="/management" element={<ProtectedRoute><Management /></ProtectedRoute>} />
+      <Route path="/resources" element={<ProtectedRoute><Resources /></ProtectedRoute>} />
+                      <Route path="/management" element={<ProtectedRoute><Management /></ProtectedRoute>} />
       <Route path="/findings" element={<ProtectedRoute><Findings /></ProtectedRoute>} />
       <Route path="/findings/:id" element={<ProtectedRoute><FindingDetail /></ProtectedRoute>} />
       <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
