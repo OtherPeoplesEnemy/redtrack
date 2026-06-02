@@ -193,6 +193,7 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{box.name}</div>
           <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'monospace' }}>{box.ip_address || box.hostname || 'No IP set'}</div>
+          <div style={{ fontSize: 9, color: 'var(--muted2)', fontFamily: 'monospace', marginTop: 2, userSelect: 'all' }}>{box.id}</div>
         </div>
         <span style={{ fontSize: 10, fontWeight: 700, color: statusColor, textTransform: 'uppercase', letterSpacing: '.08em' }}>
           {STATUS_LABEL[box.status] || box.status}
