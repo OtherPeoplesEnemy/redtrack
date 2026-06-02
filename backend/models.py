@@ -341,6 +341,18 @@ class JumpBox(Base):
     auto_release_hours: Mapped[int] = mapped_column(default=8)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+class JumpBoxSession(Base):
+    __tablename__ = "jumpbox_sessions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    jumpbox_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jumpboxes.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    engagement_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("engagements.id"), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[Optional[int]] = mapped_column(nullable=True)
+    commands: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+
 
 class VulnTemplate(Base):
     __tablename__ = "vuln_templates"

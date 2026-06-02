@@ -20,7 +20,7 @@ import hmac
 from config import get_settings
 from database import create_tables, get_db
 from models import (
-    JumpBox,
+    JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
     Severity, FindingStatus, EngagementStatus, UserRole
@@ -1691,4 +1691,123 @@ async def _jumpbox_out(box, db):
         "checked_out_at": str(box.checked_out_at) if box.checked_out_at else None,
         "checkout_notes": box.checkout_notes,
         "auto_release_hours": box.auto_release_hours,
+    }
+
+@app.post("/jumpboxes/{box_id}/sessions", status_code=201)
+async def start_session(box_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Start a new recording session for a jump box."""
+    # Verify box exists
+    box = (await db.execute(select(JumpBox).where(JumpBox.id == box_id))).scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+
+    # Auto checkout if not already
+    if box.status != "checked_out" or box.checked_out_by_id != current_user.id:
+        box.status = "checked_out"
+        box.checked_out_by_id = current_user.id
+        box.checked_out_at = datetime.now(timezone.utc)
+        if body.get("engagement_id"):
+            box.checked_out_engagement_id = uuid.UUID(body["engagement_id"])
+
+    session = JumpBoxSession(
+        jumpbox_id=box_id,
+        user_id=current_user.id,
+        engagement_id=uuid.UUID(body["engagement_id"]) if body.get("engagement_id") else None,
+        commands=[],
+        status="active",
+    )
+    db.add(session)
+    await db.flush()
+    return {"session_id": str(session.id), "started_at": str(session.started_at)}
+
+
+@app.post("/jumpboxes/sessions/{session_id}/command")
+async def log_command(session_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Log a command and its output to the session."""
+    session = (await db.execute(select(JumpBoxSession).where(JumpBoxSession.id == session_id))).scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if session.status != "active":
+        raise HTTPException(400, "Session is not active")
+
+    commands = session.commands or []
+    commands.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "command": body.get("command", ""),
+        "output": body.get("output", ""),
+        "exit_code": body.get("exit_code"),
+        "cwd": body.get("cwd", ""),
+    })
+    session.commands = commands
+    return {"logged": True, "total_commands": len(commands)}
+
+
+@app.post("/jumpboxes/sessions/{session_id}/end")
+async def end_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """End a recording session."""
+    session = (await db.execute(select(JumpBoxSession).where(JumpBoxSession.id == session_id))).scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    session.ended_at = datetime.now(timezone.utc)
+    session.status = "completed"
+    if session.started_at:
+        delta = session.ended_at - session.started_at
+        session.duration_seconds = int(delta.total_seconds())
+
+    # Check in the jump box
+    box = (await db.execute(select(JumpBox).where(JumpBox.id == session.jumpbox_id))).scalar_one_or_none()
+    if box and box.checked_out_by_id == current_user.id:
+        box.status = "available"
+        box.checked_out_by_id = None
+        box.checked_out_at = None
+        box.checkout_notes = None
+        box.checked_out_engagement_id = None
+
+    return {"session_id": str(session.id), "duration_seconds": session.duration_seconds, "commands": len(session.commands or [])}
+
+
+@app.get("/jumpboxes/{box_id}/sessions")
+async def list_sessions(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """List all sessions for a jump box."""
+    result = await db.execute(
+        select(JumpBoxSession)
+        .where(JumpBoxSession.jumpbox_id == box_id)
+        .order_by(JumpBoxSession.started_at.desc())
+    )
+    sessions = result.scalars().all()
+    out = []
+    for s in sessions:
+        user = (await db.execute(select(User).where(User.id == s.user_id))).scalar_one_or_none()
+        out.append({
+            "id": str(s.id),
+            "jumpbox_id": str(s.jumpbox_id),
+            "username": user.username if user else "unknown",
+            "full_name": user.full_name if user else "unknown",
+            "started_at": str(s.started_at),
+            "ended_at": str(s.ended_at) if s.ended_at else None,
+            "duration_seconds": s.duration_seconds,
+            "command_count": len(s.commands or []),
+            "status": s.status,
+        })
+    return out
+
+
+@app.get("/jumpboxes/sessions/{session_id}")
+async def get_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get full session with all commands."""
+    session = (await db.execute(select(JumpBoxSession).where(JumpBoxSession.id == session_id))).scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+    user = (await db.execute(select(User).where(User.id == session.user_id))).scalar_one_or_none()
+    return {
+        "id": str(session.id),
+        "jumpbox_id": str(session.jumpbox_id),
+        "username": user.username if user else "unknown",
+        "full_name": user.full_name if user else "unknown",
+        "started_at": str(session.started_at),
+        "ended_at": str(session.ended_at) if session.ended_at else None,
+        "duration_seconds": session.duration_seconds,
+        "commands": session.commands or [],
+        "status": session.status,
     }

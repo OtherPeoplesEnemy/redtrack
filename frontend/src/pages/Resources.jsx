@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import api from '../api/client'
 import toast from 'react-hot-toast'
+import SessionViewer from '../components/SessionViewer'
 
 const OS_TYPES = ['Kali Linux', 'Parrot OS', 'Windows', 'Ubuntu', 'RHEL', 'macOS', 'Custom']
 const LOCATIONS = ['Internal', 'Cloud', 'DMZ', 'External', 'Lab', 'Client Site', 'Custom']
@@ -12,6 +13,7 @@ export default function Resources() {
   const qc = useQueryClient()
   const [showModal, setShowModal] = useState(false)
   const [editBox, setEditBox] = useState(null)
+  const [viewingSessions, setViewingSessions] = useState(null)
   const [form, setForm] = useState({ name: '', hostname: '', ip_address: '', os: 'Kali Linux', os_custom: '', location: 'Internal', location_custom: '', purpose: '', notes: '', auto_release_hours: 8 })
 
   const { data: jumpboxes = [], isLoading } = useQuery('jumpboxes', () => api.get('/jumpboxes/').then(r => r.data))
@@ -88,9 +90,19 @@ export default function Resources() {
               onDelete={() => { if (confirm(`Delete ${box.name}?`)) deleteMutation.mutate(box.id) }}
               onCheckout={(engId, notes) => checkoutMutation.mutate({ id: box.id, engagement_id: engId, notes })}
               onCheckin={() => checkinMutation.mutate(box.id)}
+              onViewSessions={() => setViewingSessions(box)}
             />
           ))}
         </div>
+      )}
+
+      {/* Session Viewer */}
+      {viewingSessions && (
+        <SessionViewer
+          jumpboxId={viewingSessions.id}
+          jumpboxName={viewingSessions.name}
+          onClose={() => setViewingSessions(null)}
+        />
       )}
 
       {/* Add/Edit Modal */}
@@ -167,7 +179,7 @@ export default function Resources() {
   )
 }
 
-function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin }) {
+function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin, onViewSessions }) {
   const [showCheckout, setShowCheckout] = useState(false)
   const [checkoutEngId, setCheckoutEngId] = useState('')
   const [checkoutNotes, setCheckoutNotes] = useState('')
@@ -176,7 +188,6 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
 
   return (
     <div style={{ background: 'var(--surface)', border: `1px solid ${statusColor}33`, borderRadius: 10, overflow: 'hidden' }}>
-      {/* Header */}
       <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{ width: 10, height: 10, borderRadius: '50%', background: statusColor, flexShrink: 0, boxShadow: `0 0 6px ${statusColor}` }} />
         <div style={{ flex: 1 }}>
@@ -188,7 +199,6 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
         </span>
       </div>
 
-      {/* Details */}
       <div style={{ padding: '12px 16px' }}>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={cs.tag}>{box.os}</span>
@@ -196,13 +206,15 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
           {box.purpose && <span style={{ ...cs.tag, color: 'var(--text)' }}>{box.purpose}</span>}
         </div>
 
-        {/* Checked out info */}
-        {box.status === 'checked_out' && box.checked_out_by && (
+        {box.status === 'checked_out' && (
           <div style={{ background: 'var(--amber-dim)', border: '1px solid var(--amber)', borderRadius: 6, padding: '8px 12px', marginBottom: 10 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 4 }}>Currently in use</div>
-            <div style={{ fontSize: 11, color: 'var(--text)' }}>@{box.checked_out_by_username} · {box.checked_out_engagement || 'No engagement'}</div>
-            {box.checkout_notes && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>{box.checkout_notes}</div>}
-            {box.checked_out_at && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2, fontFamily: 'monospace' }}>Since {new Date(box.checked_out_at).toLocaleString()}</div>}
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 6 }}>Currently in use</div>
+            <div style={{ fontSize: 11, color: 'var(--text)', marginBottom: 2 }}>
+              👤 @{box.checked_out_by_username || 'unknown'}
+              {box.checked_out_engagement && <span style={{ marginLeft: 8 }}>· 📋 {box.checked_out_engagement}</span>}
+            </div>
+            {box.checkout_notes && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4 }}>"{box.checkout_notes}"</div>}
+            {box.checked_out_at && <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 4, fontFamily: 'monospace' }}>Since {new Date(box.checked_out_at).toLocaleString()}</div>}
           </div>
         )}
 
@@ -210,7 +222,6 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
           <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10, lineHeight: 1.5 }}>{box.notes}</div>
         )}
 
-        {/* Checkout form */}
         {showCheckout && (
           <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: 12, marginBottom: 10 }}>
             <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Check Out</div>
@@ -223,22 +234,20 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
             <input style={{ ...cs.input, marginBottom: 8 }} value={checkoutNotes} onChange={e => setCheckoutNotes(e.target.value)} placeholder="What are you using it for?" />
             <div style={{ display: 'flex', gap: 6 }}>
               <button style={cs.btnPrimary} onClick={() => { onCheckout(checkoutEngId || null, checkoutNotes); setShowCheckout(false); setCheckoutNotes(''); setCheckoutEngId('') }}>
-                Check Out
+                Confirm Check Out
               </button>
               <button style={cs.btn} onClick={() => setShowCheckout(false)}>Cancel</button>
             </div>
           </div>
         )}
 
-        {/* Actions */}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {isAvailable ? (
-            <button style={cs.btnGreen} onClick={() => setShowCheckout(!showCheckout)}>
-              ↓ Check Out
-            </button>
+            <button style={cs.btnGreen} onClick={() => setShowCheckout(!showCheckout)}>↓ Check Out</button>
           ) : box.status === 'checked_out' ? (
             <button style={cs.btnOrange} onClick={onCheckin}>↑ Check In</button>
           ) : null}
+          <button style={{ ...cs.btn, color: '#60a5fa', borderColor: '#60a5fa55' }} onClick={onViewSessions}>📋 Sessions</button>
           <button style={cs.btn} onClick={onEdit}>Edit</button>
           <button style={{ ...cs.btn, color: 'var(--red)', borderColor: 'var(--red-mid)', marginLeft: 'auto' }} onClick={onDelete}>Del</button>
         </div>
