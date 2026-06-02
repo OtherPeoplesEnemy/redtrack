@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 RedTrack CLI Session Recorder
-Wraps the shell and captures all commands + output to RedTrack.
+Records shell commands and output to RedTrack.
 
 Usage:
-    redtrack-cli session start <jumpbox_id>
-    redtrack-cli session end
-    redtrack-cli sessions list <jumpbox_id>
-    redtrack-cli sessions view <session_id>
+    python3 session_recorder.py start <jumpbox_id> [engagement_id]
+    python3 session_recorder.py end
+    python3 session_recorder.py list <jumpbox_id>
+    python3 session_recorder.py view <session_id>
 """
 
 import os
@@ -16,273 +16,301 @@ import sys
 import select
 import termios
 import tty
-import signal
+import re
 import json
 import time
-import re
 import requests
+import configparser
 from datetime import datetime
 from pathlib import Path
 
-CONFIG_FILE = Path.home() / ".redtrack" / "config.json"
-SESSION_FILE = Path.home() / ".redtrack" / "current_session.json"
+CONFIG_DIR = Path.home() / ".redtrack"
+SESSION_FILE = CONFIG_DIR / "current_session.json"
+
+ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+def clean_text(text):
+    text = ANSI_RE.sub('', text)
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text.strip()
 
 
 def load_config():
-    if not CONFIG_FILE.exists():
+    ini_file = CONFIG_DIR / "config.ini"
+    json_file = CONFIG_DIR / "config.json"
+    if ini_file.exists():
+        config = configparser.ConfigParser()
+        config.read(ini_file)
+        url = config.get("server", "url", fallback="")
+        if not url.startswith("http"):
+            url = "https://" + url
+        return {"base_url": url.rstrip("/"), "api_key": config.get("server", "api_key", fallback="")}
+    elif json_file.exists():
+        with open(json_file) as f:
+            return json.load(f)
+    else:
         print("RedTrack not configured. Run: redtrack-cli config")
         sys.exit(1)
-    with open(CONFIG_FILE) as f:
-        return json.load(f)
 
 
 def get_headers(config):
-    return {
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json"
-    }
+    return {"X-API-Key": config["api_key"], "Content-Type": "application/json"}
+
+
+def api_post(config, path, data=None):
+    import urllib3
+    urllib3.disable_warnings()
+    return requests.post(
+        f"{config['base_url']}/api{path}",
+        json=data or {},
+        headers=get_headers(config),
+        verify=False,
+        timeout=10
+    )
+
+
+def api_get(config, path):
+    import urllib3
+    urllib3.disable_warnings()
+    return requests.get(
+        f"{config['base_url']}/api{path}",
+        headers=get_headers(config),
+        verify=False,
+        timeout=10
+    )
+
+
+def log_command(config, session_id, command, output, cwd="", exit_code=0):
+    """Send a command log to RedTrack — non-blocking."""
+    try:
+        api_post(config, f"/jumpboxes/sessions/{session_id}/command", {
+            "command": command,
+            "output": output[:5000],  # Cap output at 5KB
+            "exit_code": exit_code,
+            "cwd": cwd,
+        })
+    except Exception:
+        pass  # Never interrupt the session
 
 
 def start_session(jumpbox_id, engagement_id=None):
     config = load_config()
-    base_url = config["base_url"].rstrip("/")
 
-    print(f"\033[0;31m[RedTrack]\033[0m Starting session for jump box {jumpbox_id}...")
+    print(f"\033[0;31m[RedTrack]\033[0m Connecting to {config['base_url']}...")
 
-    resp = requests.post(
-        f"{base_url}/api/jumpboxes/{jumpbox_id}/sessions",
-        json={"engagement_id": engagement_id},
-        headers=get_headers(config),
-        verify=False
-    )
+    resp = api_post(config, f"/jumpboxes/{jumpbox_id}/sessions",
+                    {"engagement_id": engagement_id})
 
     if resp.status_code != 201:
-        print(f"\033[0;31m[RedTrack]\033[0m Failed to start session: {resp.text}")
+        print(f"\033[0;31m[RedTrack]\033[0m Failed: {resp.text}")
         sys.exit(1)
 
     data = resp.json()
     session_id = data["session_id"]
 
-    # Save session info locally
-    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(SESSION_FILE, "w") as f:
         json.dump({
             "session_id": session_id,
             "jumpbox_id": jumpbox_id,
-            "base_url": base_url,
+            "base_url": config["base_url"],
             "api_key": config["api_key"],
-            "started_at": data["started_at"]
         }, f)
 
-    print(f"\033[0;31m[RedTrack]\033[0m Session started: {session_id}")
-    print(f"\033[0;31m[RedTrack]\033[0m All commands will be recorded. Type 'exit' or run 'redtrack-cli session end' to stop.\033[0m\n")
+    print(f"\033[0;31m[RedTrack]\033[0m \033[0;32mSession started!\033[0m ID: {session_id[:8]}...")
+    print(f"\033[0;31m[RedTrack]\033[0m Recording all commands. Type \033[0;33mexit\033[0m to end session.\033[0m\n")
 
-    # Start the recording shell
-    _record_shell(session_id, base_url, get_headers(config))
+    _record_shell(session_id, config)
 
 
-def _record_shell(session_id, base_url, headers):
-    """Wrap the shell using PTY and capture all I/O."""
-    command_buffer = ""
-    output_buffer = ""
-    pending_command = None
-    last_flush = time.time()
+def _record_shell(session_id, config):
+    """Record shell using PTY with clean ANSI stripping."""
 
-    def send_command(cmd, output, exit_code=0):
-        if not cmd.strip():
-            return
-        try:
-            requests.post(
-                f"{base_url}/api/jumpboxes/sessions/{session_id}/command",
-                json={
-                    "command": cmd.strip(),
-                    "output": output.strip(),
-                    "exit_code": exit_code,
-                    "cwd": os.getcwd(),
-                },
-                headers=headers,
-                verify=False,
-                timeout=5
-            )
-        except Exception:
-            pass  # Don't interrupt the session if logging fails
-
-    # Fork a PTY
     pid, master_fd = pty.fork()
 
     if pid == 0:
-        # Child process — exec the shell
         shell = os.environ.get("SHELL", "/bin/bash")
         os.execv(shell, [shell])
-    else:
-        # Parent process — intercept I/O
-        old_settings = termios.tcgetattr(sys.stdin)
-        try:
-            tty.setraw(sys.stdin.fileno())
+        sys.exit(0)
 
-            input_buf = b""
-            output_buf = b""
+    old_tty = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setraw(sys.stdin.fileno())
 
-            while True:
+        input_lines = []
+        current_input = b""
+        current_output = b""
+        collecting_output = False
+
+        while True:
+            try:
+                rfds, _, _ = select.select([sys.stdin, master_fd], [], [], 0.05)
+            except (KeyboardInterrupt, OSError):
+                break
+
+            # User typed something
+            if sys.stdin in rfds:
                 try:
-                    r, _, _ = select.select([sys.stdin, master_fd], [], [], 0.1)
-                except (KeyboardInterrupt, OSError):
+                    data = os.read(sys.stdin.fileno(), 256)
+                except OSError:
+                    break
+                if not data:
+                    break
+                try:
+                    os.write(master_fd, data)
+                except OSError:
                     break
 
-                if sys.stdin in r:
-                    data = os.read(sys.stdin.fileno(), 1024)
-                    if not data:
-                        break
-                    # Track what user types
-                    input_buf += data
-                    # Send to PTY
-                    try:
-                        os.write(master_fd, data)
-                    except OSError:
-                        break
+                # Track input — newline means command submitted
+                if b'\n' in data or b'\r' in data:
+                    cmd = clean_text(current_input.decode('utf-8', errors='replace'))
+                    if cmd:
+                        input_lines.append(cmd)
+                        collecting_output = True
+                        current_output = b""
+                    current_input = b""
+                else:
+                    # Handle backspace
+                    if data in (b'\x7f', b'\x08'):
+                        current_input = current_input[:-1]
+                    else:
+                        current_input += data
 
-                if master_fd in r:
-                    try:
-                        data = os.read(master_fd, 10240)
-                    except OSError:
-                        break
-                    if not data:
-                        break
-                    # Write to terminal
+            # Shell produced output
+            if master_fd in rfds:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                try:
                     os.write(sys.stdout.fileno(), data)
-                    output_buf += data
+                except OSError:
+                    break
 
-                    # Flush command every time we see a prompt ($ or #)
-                    decoded = data.decode("utf-8", errors="replace")
-                    if decoded.strip().endswith("$") or decoded.strip().endswith("#") or decoded.strip().endswith(">"):
-                        # Extract last command from input buffer
-                        inp = input_buf.decode("utf-8", errors="replace")
-                        lines = [l for l in inp.split("\n") if l.strip()]
-                        if lines:
-                            cmd = lines[-1].strip()
-                            out = output_buf.decode("utf-8", errors="replace")
-                            # Remove ANSI escape codes
-                            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                            clean_out = ansi_escape.sub('', out)
-                            send_command(cmd, clean_out)
-                            input_buf = b""
-                            output_buf = b""
+                if collecting_output:
+                    current_output += data
 
-                # Periodic flush every 30 seconds
-                if time.time() - last_flush > 30:
-                    inp = input_buf.decode("utf-8", errors="replace")
-                    out = output_buf.decode("utf-8", errors="replace")
-                    if inp.strip():
-                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                        send_command(inp.strip(), ansi_escape.sub('', out))
-                        input_buf = b""
-                        output_buf = b""
-                    last_flush = time.time()
+                    # Detect prompt (end of command output)
+                    decoded = clean_text(data.decode('utf-8', errors='replace'))
+                    if decoded.endswith('$') or decoded.endswith('#') or decoded.endswith('>'):
+                        if input_lines:
+                            cmd = input_lines.pop(0)
+                            output = clean_text(current_output.decode('utf-8', errors='replace'))
+                            # Remove the command echo from output
+                            if output.startswith(cmd):
+                                output = output[len(cmd):].strip()
+                            cwd = os.getcwd()
+                            log_command(config, session_id, cmd, output, cwd)
+                        collecting_output = False
+                        current_output = b""
 
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-            try:
-                os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+        try:
+            os.waitpid(pid, 0)
+        except Exception:
+            pass
 
-        print(f"\n\033[0;31m[RedTrack]\033[0m Shell exited. Ending session...")
-        end_session_local()
+    print(f"\n\033[0;31m[RedTrack]\033[0m Session ended.")
+    end_session_local()
 
 
 def end_session_local():
-    """End the current session."""
     if not SESSION_FILE.exists():
-        print("No active session found.")
+        print("No active session.")
         return
-
     with open(SESSION_FILE) as f:
         session = json.load(f)
-
-    config = {"api_key": session["api_key"]}
-    base_url = session["base_url"]
-    session_id = session["session_id"]
-
-    try:
-        resp = requests.post(
-            f"{base_url}/api/jumpboxes/sessions/{session_id}/end",
-            headers=get_headers(config),
-            verify=False,
-            timeout=10
-        )
+    config = {"base_url": session["base_url"], "api_key": session["api_key"]}
+    resp = api_post(config, f"/jumpboxes/sessions/{session['session_id']}/end")
+    if resp.status_code == 200:
         data = resp.json()
-        duration = data.get("duration_seconds", 0)
-        commands = data.get("commands", 0)
-        mins = duration // 60
-        secs = duration % 60
-        print(f"\033[0;31m[RedTrack]\033[0m Session ended — {commands} commands logged, duration {mins}m {secs}s")
-    except Exception as e:
-        print(f"\033[0;31m[RedTrack]\033[0m Failed to end session: {e}")
-
+        dur = data.get("duration_seconds", 0)
+        cmds = data.get("commands", 0)
+        print(f"\033[0;31m[RedTrack]\033[0m Done — {cmds} commands, {dur // 60}m {dur % 60}s")
     SESSION_FILE.unlink(missing_ok=True)
 
 
 def list_sessions(jumpbox_id):
     config = load_config()
-    base_url = config["base_url"].rstrip("/")
-
-    resp = requests.get(
-        f"{base_url}/api/jumpboxes/{jumpbox_id}/sessions",
-        headers=get_headers(config),
-        verify=False
-    )
-
+    resp = api_get(config, f"/jumpboxes/{jumpbox_id}/sessions")
     if resp.status_code != 200:
         print(f"Failed: {resp.text}")
         return
-
     sessions = resp.json()
     if not sessions:
-        print("No sessions found for this jump box.")
+        print("No sessions recorded yet.")
         return
-
-    print(f"\n{'ID':<38} {'User':<15} {'Started':<20} {'Duration':<12} {'Commands':<10} {'Status'}")
-    print("-" * 105)
+    print(f"\n{'ID':<12} {'User':<12} {'Started':<18} {'Duration':<10} {'Cmds':<6} Status")
+    print("─" * 70)
     for s in sessions:
-        duration = f"{s['duration_seconds'] // 60}m {s['duration_seconds'] % 60}s" if s.get('duration_seconds') else "Active"
+        dur = f"{s['duration_seconds']//60}m{s['duration_seconds']%60}s" if s.get('duration_seconds') else "Active"
         started = s['started_at'][:16].replace('T', ' ')
-        print(f"{s['id']:<38} {s['username']:<15} {started:<20} {duration:<12} {s['command_count']:<10} {s['status']}")
+        sid = s['id'][:8] + "..."
+        print(f"{sid:<12} {s['username']:<12} {started:<18} {dur:<10} {s['command_count']:<6} {s['status']}")
 
 
 def view_session(session_id):
     config = load_config()
-    base_url = config["base_url"].rstrip("/")
-
-    resp = requests.get(
-        f"{base_url}/api/jumpboxes/sessions/{session_id}",
-        headers=get_headers(config),
-        verify=False
-    )
-
+    resp = api_get(config, f"/jumpboxes/sessions/{session_id}")
     if resp.status_code != 200:
         print(f"Failed: {resp.text}")
         return
-
-    session = resp.json()
-    print(f"\n\033[0;31m[RedTrack]\033[0m Session: {session['id']}")
-    print(f"User: {session['full_name']} (@{session['username']})")
-    print(f"Started: {session['started_at'][:16].replace('T', ' ')}")
-    if session.get('ended_at'):
-        duration = session.get('duration_seconds', 0)
-        print(f"Duration: {duration // 60}m {duration % 60}s")
-    print(f"Commands: {len(session['commands'])}\n")
+    s = resp.json()
+    print(f"\n\033[0;31m[RedTrack]\033[0m Session: {s['id']}")
+    print(f"User: @{s['username']} | Started: {s['started_at'][:16]} | Commands: {len(s['commands'])}\n")
     print("─" * 80)
-
-    for cmd in session['commands']:
+    for cmd in s['commands']:
         ts = cmd['timestamp'][:19].replace('T', ' ')
         cwd = cmd.get('cwd', '')
         print(f"\033[0;34m[{ts}]\033[0m \033[0;32m{cwd}\033[0m")
-        print(f"\033[0;31m$\033[0m {cmd['command']}")
+        print(f"\033[0;31m$\033[0m \033[1m{cmd['command']}\033[0m")
         if cmd.get('output'):
-            # Show first 20 lines of output
-            lines = cmd['output'].split('\n')[:20]
+            lines = cmd['output'].split('\n')[:15]
             for line in lines:
                 print(f"  {line}")
-            if len(cmd['output'].split('\n')) > 20:
-                print(f"  \033[0;33m... ({len(cmd['output'].split(chr(10))) - 20} more lines)\033[0m")
+            extra = len(cmd['output'].split('\n')) - 15
+            if extra > 0:
+                print(f"  \033[0;33m... {extra} more lines\033[0m")
         print()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("RedTrack Session Recorder")
+        print("Usage:")
+        print("  python3 session_recorder.py start <jumpbox_id> [engagement_id]")
+        print("  python3 session_recorder.py end")
+        print("  python3 session_recorder.py list <jumpbox_id>")
+        print("  python3 session_recorder.py view <session_id>")
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+
+    if cmd == "start":
+        if len(sys.argv) < 3:
+            print("Usage: python3 session_recorder.py start <jumpbox_id>")
+            sys.exit(1)
+        start_session(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+
+    elif cmd == "end":
+        end_session_local()
+
+    elif cmd == "list":
+        if len(sys.argv) < 3:
+            print("Usage: python3 session_recorder.py list <jumpbox_id>")
+            sys.exit(1)
+        list_sessions(sys.argv[2])
+
+    elif cmd == "view":
+        if len(sys.argv) < 3:
+            print("Usage: python3 session_recorder.py view <session_id>")
+            sys.exit(1)
+        view_session(sys.argv[2])
+
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
