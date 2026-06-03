@@ -232,7 +232,7 @@ export default function FindingDetail() {
                 </div>
                 {editField === field
                   ? <div>
-                      <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} placeholder={`Write ${label.toLowerCase()} in markdown...`} />
+                      <MarkdownEditor findingId={id} value={editVal} onChange={setEditVal} minHeight={120} placeholder={`Write ${label.toLowerCase()} in markdown...`} />
                       <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                         <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ [field]: editVal })}>Save</button>
                         <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
@@ -252,7 +252,7 @@ export default function FindingDetail() {
               </div>
               {editField === 'steps_to_reproduce'
                 ? <div>
-                    <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} />
+                    <MarkdownEditor findingId={id} value={editVal} onChange={setEditVal} minHeight={120} />
                     <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                       <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ steps_to_reproduce: editVal })}>Save</button>
                       <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
@@ -269,7 +269,7 @@ export default function FindingDetail() {
               </div>
               {editField === 'remediation'
                 ? <div>
-                    <MarkdownEditor value={editVal} onChange={setEditVal} minHeight={120} />
+                    <MarkdownEditor findingId={id} value={editVal} onChange={setEditVal} minHeight={120} />
                     <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                       <button style={s.btnPrimary} onClick={() => updateMutation.mutate({ remediation: editVal })}>Save</button>
                       <button style={s.btn} onClick={() => setEditField(null)}>Cancel</button>
