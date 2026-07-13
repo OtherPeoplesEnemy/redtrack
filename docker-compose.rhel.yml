@@ -1,18 +1,18 @@
 # RedTrack v2 — RHEL Enterprise Docker Compose
-# Uses Red Hat Hardened Images (registry.redhat.io/hi/)
-# Requires: docker login registry.redhat.io
+# Uses Red Hat Hardened Images (registry.access.redhat.com/hi/)
+# Requires: docker login registry.access.redhat.com
 # Usage: docker compose -f docker-compose.rhel.yml up --build -d
 
 version: "3.9"
 
 services:
   db:
-    image: registry.redhat.io/hi/postgresql-15:latest
+    image: registry.access.redhat.com/hi/postgresql:18.3
     restart: always
     environment:
-      POSTGRESQL_USER: redtrack
-      POSTGRESQL_PASSWORD: redtrack_secret
-      POSTGRESQL_DATABASE: redtrack
+      POSTGRES_USER: redtrack
+      POSTGRES_PASSWORD: redtrack_secret
+      POSTGRES_DATABASE: redtrack
     volumes:
       - postgres_data:/var/lib/pgsql/data:z
     healthcheck:
@@ -22,7 +22,7 @@ services:
       retries: 5
 
   redis:
-    image: registry.redhat.io/hi/redis-7:latest
+    image: registry.access.redhat.com/hi/valkey:9.0
     restart: always
 
   backend:
@@ -51,11 +51,11 @@ services:
       - ./frontend/src:/app/src:z
 
   nginx:
-    image: registry.redhat.io/hi/nginx-122:latest
+    image: registry.access.redhat.com/hi/nginx:1.30
     restart: always
     ports:
-      - "443:443"
-      - "80:80"
+      - "443:8443"
+      - "80:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro,z
       - ./nginx/certs:/etc/nginx/certs:ro,z

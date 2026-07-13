@@ -40,13 +40,13 @@ echo -e "${CYAN}  Red Hat Registry Authentication${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "  RedTrack RHEL edition uses Red Hat Hardened Images."
-echo "  You need to authenticate with registry.redhat.io"
+echo "  You need to authenticate with registry.access.redhat.com"
 echo ""
 read -p "  Red Hat username: " RH_USER
 read -s -p "  Red Hat password: " RH_PASS
 echo ""
-echo -e "${YELLOW}[*] Logging into registry.redhat.io...${NC}"
-echo "$RH_PASS" | docker login registry.redhat.io -u "$RH_USER" --password-stdin
+echo -e "${YELLOW}[*] Logging into registry.access.redhat.com...${NC}"
+echo "$RH_PASS" | docker login registry.access.redhat.com -u "$RH_USER" --password-stdin
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}[✓] Authenticated with Red Hat registry${NC}"
 else
