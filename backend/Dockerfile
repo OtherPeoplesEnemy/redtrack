@@ -4,6 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     libffi-dev shared-mime-info \
+    libxml2-dev libxmlsec1-dev libxmlsec1-openssl pkg-config gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

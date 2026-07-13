@@ -1,14 +1,27 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { ssoApi } from '../api/client'
 import toast from 'react-hot-toast'
+
+const ssoBtnStyle = {
+  display: 'block', width: '100%', boxSizing: 'border-box', textAlign: 'center',
+  background: 'var(--surface2)', border: '1px solid var(--border2)', borderRadius: 5,
+  color: 'var(--text)', padding: '10px', fontSize: 12, cursor: 'pointer',
+  fontFamily: 'monospace', fontWeight: 700, textDecoration: 'none',
+}
 
 export default function Login() {
   const [email, setEmail] = useState('admin@redtrack.com')
   const [password, setPassword] = useState('RedTrack2026!')
   const [loading, setLoading] = useState(false)
+  const [sso, setSso] = useState({ saml_enabled: false, oidc_enabled: false })
   const { login } = useAuth()
   const navigate = useNavigate()
+
+  useEffect(() => {
+    ssoApi.status().then(({ data }) => setSso(data)).catch(() => {})
+  }, [])
 
   async function handleSubmit() {
     setLoading(true)
@@ -31,6 +44,25 @@ export default function Login() {
           <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.12em', marginTop: 2 }}>Pentest Management Platform v2</div>
         </div>
         <div style={{ padding: 32 }}>
+          {(sso.saml_enabled || sso.oidc_enabled) && (
+            <>
+              {sso.saml_enabled && (
+                <a href={ssoApi.samlLoginUrl()} style={{ ...ssoBtnStyle, marginBottom: 8 }}>
+                  Sign in with SAML SSO →
+                </a>
+              )}
+              {sso.oidc_enabled && (
+                <a href={ssoApi.oidcLoginUrl()} style={{ ...ssoBtnStyle, marginBottom: 18 }}>
+                  Sign in with SSO →
+                </a>
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 18px' }}>
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+                <span style={{ fontSize: 10, color: 'var(--muted2)', textTransform: 'uppercase', letterSpacing: '.08em' }}>or</span>
+                <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
+              </div>
+            </>
+          )}
           <div style={{ marginBottom: 14 }}>
             <label style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', display: 'block', marginBottom: 5 }}>Email</label>
             <input

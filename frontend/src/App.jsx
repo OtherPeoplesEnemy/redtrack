@@ -17,6 +17,8 @@ import TaskLibrary from './pages/TaskLibrary'
 import Management from './pages/Management'
 import Resources from './pages/Resources'
 import Kanban from './pages/Kanban'
+import SSOSettings from './pages/SSOSettings'
+import SSOCallback from './pages/SSOCallback'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } })
 
@@ -31,6 +33,7 @@ const NAV = [
   { to: '/task-library', label: 'Task Library', icon: '✓' },
   { to: '/reports', label: 'Reports', icon: '◧' },
   { to: '/integrations', label: 'Integrations', icon: '⟳' },
+  { to: '/sso', label: 'SSO / Auth', icon: '🔐' },
   { to: '/settings', label: 'Settings', icon: '◎' },
 ]
 
@@ -100,6 +103,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+      <Route path="/sso/callback" element={<SSOCallback />} />
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/engagements" element={<ProtectedRoute><Engagements /></ProtectedRoute>} />
@@ -114,6 +118,7 @@ function AppRoutes() {
       <Route path="/task-library" element={<ProtectedRoute><TaskLibrary /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/integrations" element={<ProtectedRoute><Integrations /></ProtectedRoute>} />
+      <Route path="/sso" element={<ProtectedRoute><SSOSettings /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   )

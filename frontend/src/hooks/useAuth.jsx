@@ -27,13 +27,21 @@ export function AuthProvider({ children }) {
     return data.user
   }
 
+  // Used by the SSO callback page after it exchanges a one-time code for
+  // real tokens — same end state as login(), different entry point.
+  function setSession(data) {
+    localStorage.setItem('access_token', data.access_token)
+    localStorage.setItem('refresh_token', data.refresh_token)
+    setUser(data.user)
+  }
+
   function logout() {
     localStorage.clear()
     setUser(null)
   }
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, setSession }}>
       {children}
     </AuthContext.Provider>
   )

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
 
     cors_origins: str = "https://localhost"
+    # Public base URL of this deployment — used to build SAML ACS / metadata
+    # URLs and the OIDC redirect_uri. Must match what's registered with the IdP.
+    frontend_url: str = "https://localhost"
     upload_dir: str = "/app/uploads"
     max_upload_size_mb: int = 25
     redis_url: str = "redis://redis:6379"

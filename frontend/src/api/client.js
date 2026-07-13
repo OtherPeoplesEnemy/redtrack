@@ -39,6 +39,16 @@ export const authApi = {
   generateApiKey: () => api.post('/auth/api-key'),
 }
 
+export const ssoApi = {
+  status: () => api.get('/auth/sso/status'),
+  exchange: (code) => api.post('/auth/sso/exchange', { code }),
+  adminGet: () => api.get('/admin/sso'),
+  saveSaml: (data) => api.put('/admin/sso/saml', data),
+  saveOidc: (data) => api.put('/admin/sso/oidc', data),
+  samlLoginUrl: () => '/api/auth/sso/saml/login',
+  oidcLoginUrl: () => '/api/auth/sso/oidc/login',
+}
+
 export const dashboardApi = {
   stats: () => api.get('/dashboard/stats'),
 }

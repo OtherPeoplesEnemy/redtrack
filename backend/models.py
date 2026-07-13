@@ -71,7 +71,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.tester)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -80,8 +80,43 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # SSO identity — set when the account was provisioned via SAML/OIDC.
+    # sso_subject is the IdP's stable subject identifier (NameID / OIDC `sub`),
+    # scoped per-provider since two IdPs could theoretically reuse a subject string.
+    sso_provider: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    sso_subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+
     findings: Mapped[list["Finding"]] = relationship("Finding", back_populates="tester_user", foreign_keys="Finding.tester_id")
     engagements: Mapped[list["EngagementMember"]] = relationship("EngagementMember", back_populates="user")
+
+
+class SSOConfig(Base):
+    """
+    One row per provider ("saml" or "oidc"). Managed entirely through the
+    admin UI — no config-file editing required to stand up SSO.
+    """
+    __tablename__ = "sso_config"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(20), unique=True, index=True)  # "saml" | "oidc"
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # SAML
+    saml_metadata_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    saml_idp_entity_id: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    saml_idp_sso_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    saml_idp_x509_cert: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # OIDC
+    oidc_issuer: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    oidc_client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    oidc_client_secret: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # Shared provisioning behavior
+    auto_provision: Mapped[bool] = mapped_column(Boolean, default=True)
+    default_role: Mapped[str] = mapped_column(String(20), default="tester")
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class Engagement(Base):

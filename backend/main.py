@@ -3,10 +3,10 @@ RedTrack v2 — Main API Entry Point
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Query, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, UploadFile, File, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 from pathlib import Path
@@ -23,12 +23,13 @@ from models import (
     JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
-    Severity, FindingStatus, EngagementStatus, UserRole
+    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig
 )
 from auth import (
     hash_password, verify_password, create_access_token, create_refresh_token,
-    decode_token, get_current_user, require_tester_or_above, require_lead_or_admin
+    decode_token, get_current_user, require_tester_or_above, require_lead_or_admin, require_admin
 )
+import sso
 import ai_service
 from seed import seed_data
 
@@ -179,7 +180,261 @@ def _user_out(user):
         "full_name": user.full_name, "role": user.role.value if hasattr(user.role, 'value') else user.role,
         "is_active": user.is_active, "avatar_url": user.avatar_url,
         "created_at": str(user.created_at), "last_login": str(user.last_login) if user.last_login else None,
+        "sso_provider": user.sso_provider,
     }
+
+
+# ─── SSO — admin configuration ────────────────────────────────────────────────
+# Both providers are configured entirely through these routes — no env vars
+# or config files to hand-edit. Secrets are masked on read.
+
+def _sso_config_out(cfg: Optional[SSOConfig]) -> dict:
+    if not cfg:
+        return {"enabled": False}
+    out = {
+        "enabled": cfg.enabled,
+        "auto_provision": cfg.auto_provision,
+        "default_role": cfg.default_role,
+    }
+    if cfg.provider == "saml":
+        out.update({
+            "saml_metadata_url": cfg.saml_metadata_url,
+            "saml_idp_entity_id": cfg.saml_idp_entity_id,
+            "saml_idp_sso_url": cfg.saml_idp_sso_url,
+            "saml_idp_x509_cert_present": bool(cfg.saml_idp_x509_cert),
+        })
+    elif cfg.provider == "oidc":
+        out.update({
+            "oidc_issuer": cfg.oidc_issuer,
+            "oidc_client_id": cfg.oidc_client_id,
+            "oidc_client_secret_present": bool(cfg.oidc_client_secret),
+        })
+    return out
+
+
+@app.get("/admin/sso")
+async def get_sso_admin_config(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_admin)):
+    saml_cfg = await sso.get_sso_config(db, "saml")
+    oidc_cfg = await sso.get_sso_config(db, "oidc")
+    return {"saml": _sso_config_out(saml_cfg), "oidc": _sso_config_out(oidc_cfg)}
+
+
+@app.put("/admin/sso/saml")
+async def put_saml_config(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_admin)):
+    result = await db.execute(select(SSOConfig).where(SSOConfig.provider == "saml"))
+    cfg = result.scalar_one_or_none()
+    if not cfg:
+        cfg = SSOConfig(provider="saml")
+        db.add(cfg)
+
+    metadata_url = body.get("saml_metadata_url")
+    if metadata_url:
+        try:
+            idp = sso.fetch_saml_idp_metadata(metadata_url)
+        except Exception as e:
+            raise HTTPException(400, f"Could not fetch/parse IdP metadata: {e}")
+        cfg.saml_metadata_url = metadata_url
+        cfg.saml_idp_entity_id = idp["entity_id"]
+        cfg.saml_idp_sso_url = idp["sso_url"]
+        cfg.saml_idp_x509_cert = idp["x509_cert"]
+    else:
+        # Manual entry path — no metadata URL, admin pasted fields directly
+        for k in ("saml_idp_entity_id", "saml_idp_sso_url", "saml_idp_x509_cert"):
+            if k in body:
+                setattr(cfg, k, body[k])
+
+    if "enabled" in body:
+        cfg.enabled = bool(body["enabled"])
+    if "auto_provision" in body:
+        cfg.auto_provision = bool(body["auto_provision"])
+    if "default_role" in body:
+        cfg.default_role = body["default_role"]
+
+    await db.flush()
+    return _sso_config_out(cfg)
+
+
+@app.put("/admin/sso/oidc")
+async def put_oidc_config(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_admin)):
+    result = await db.execute(select(SSOConfig).where(SSOConfig.provider == "oidc"))
+    cfg = result.scalar_one_or_none()
+    if not cfg:
+        cfg = SSOConfig(provider="oidc")
+        db.add(cfg)
+
+    for k in ("oidc_issuer", "oidc_client_id"):
+        if k in body:
+            setattr(cfg, k, body[k])
+    if body.get("oidc_client_secret"):
+        cfg.oidc_client_secret = body["oidc_client_secret"]
+    if "enabled" in body:
+        cfg.enabled = bool(body["enabled"])
+    if "auto_provision" in body:
+        cfg.auto_provision = bool(body["auto_provision"])
+    if "default_role" in body:
+        cfg.default_role = body["default_role"]
+
+    if cfg.enabled:
+        try:
+            await sso.oidc_discovery(cfg.oidc_issuer)
+        except Exception as e:
+            raise HTTPException(400, f"Could not reach OIDC discovery document at issuer: {e}")
+
+    await db.flush()
+    return _sso_config_out(cfg)
+
+
+# ─── SSO — public status (drives the "Sign in with SSO" buttons on Login) ────
+
+@app.get("/auth/sso/status")
+async def sso_status(db: AsyncSession = Depends(get_db)):
+    saml_cfg = await sso.get_sso_config(db, "saml")
+    oidc_cfg = await sso.get_sso_config(db, "oidc")
+    return {
+        "saml_enabled": bool(saml_cfg and saml_cfg.enabled),
+        "oidc_enabled": bool(oidc_cfg and oidc_cfg.enabled),
+    }
+
+
+async def _provision_sso_user(db: AsyncSession, cfg: SSOConfig, provider: str, subject: str, email: str, full_name: str) -> User:
+    # Match on existing SSO link first, then fall back to email — lets an
+    # admin-created local account "adopt" SSO on first login instead of
+    # colliding on the unique email constraint.
+    result = await db.execute(
+        select(User).where(User.sso_provider == provider, User.sso_subject == subject)
+    )
+    user = result.scalar_one_or_none()
+    if user:
+        user.last_login = datetime.now(timezone.utc)
+        return user
+
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if user:
+        user.sso_provider = provider
+        user.sso_subject = subject
+        user.last_login = datetime.now(timezone.utc)
+        return user
+
+    if not cfg.auto_provision:
+        raise HTTPException(403, "No account exists for this identity and auto-provisioning is disabled")
+
+    user = User(
+        email=email,
+        username=email.split("@")[0],
+        full_name=full_name or email,
+        hashed_password=None,
+        role=cfg.default_role,
+        sso_provider=provider,
+        sso_subject=subject,
+        last_login=datetime.now(timezone.utc),
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+@app.post("/auth/sso/exchange")
+async def sso_exchange(body: dict, db: AsyncSession = Depends(get_db)):
+    user_id = await sso.consume_exchange_code(body.get("code", ""))
+    if not user_id:
+        raise HTTPException(400, "Invalid or expired SSO exchange code")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(401, "User not found or inactive")
+    return {
+        "access_token": create_access_token(str(user.id)),
+        "refresh_token": create_refresh_token(str(user.id)),
+        "token_type": "bearer",
+        "user": _user_out(user),
+    }
+
+
+# ─── SSO — SAML2 ───────────────────────────────────────────────────────────────
+
+@app.get("/auth/sso/saml/login")
+async def saml_login(request: Request, db: AsyncSession = Depends(get_db)):
+    cfg = await sso.get_sso_config(db, "saml")
+    if not cfg or not cfg.enabled:
+        raise HTTPException(404, "SAML SSO is not enabled")
+    auth = await sso.build_saml_auth(request, cfg)
+    return RedirectResponse(auth.login())
+
+
+@app.post("/auth/sso/saml/acs")
+async def saml_acs(request: Request, db: AsyncSession = Depends(get_db)):
+    cfg = await sso.get_sso_config(db, "saml")
+    if not cfg or not cfg.enabled:
+        raise HTTPException(404, "SAML SSO is not enabled")
+
+    auth = await sso.build_saml_auth(request, cfg)
+    auth.process_response()
+    errors = auth.get_errors()
+    if errors:
+        raise HTTPException(401, f"SAML assertion rejected: {', '.join(errors)} — {auth.get_last_error_reason()}")
+    if not auth.is_authenticated():
+        raise HTTPException(401, "SAML authentication failed")
+
+    attrs = auth.get_attributes()
+    name_id = auth.get_nameid()  # configured as emailAddress format
+    email = name_id
+    full_name = (attrs.get("displayName") or attrs.get("name") or [None])[0] or email
+
+    user = await _provision_sso_user(db, cfg, "saml", subject=name_id, email=email, full_name=full_name)
+    code = await sso.store_exchange_code(str(user.id))
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/sso/callback?code={code}", status_code=303)
+
+
+@app.get("/auth/sso/saml/metadata")
+async def saml_metadata(request: Request, db: AsyncSession = Depends(get_db)):
+    cfg = await sso.get_sso_config(db, "saml")
+    if not cfg:
+        raise HTTPException(404, "SAML is not configured")
+    from onelogin.saml2.settings import OneLogin_Saml2_Settings
+    saml_settings = OneLogin_Saml2_Settings(sso._saml_settings(cfg), sp_validation_only=True)
+    metadata = saml_settings.get_sp_metadata()
+    errors = saml_settings.validate_metadata(metadata)
+    if errors:
+        raise HTTPException(500, f"Invalid SP metadata: {errors}")
+    return Response(content=metadata, media_type="application/xml")
+
+
+# ─── SSO — OIDC ─────────────────────────────────────────────────────────────────
+
+@app.get("/auth/sso/oidc/login")
+async def oidc_login(db: AsyncSession = Depends(get_db)):
+    cfg = await sso.get_sso_config(db, "oidc")
+    if not cfg or not cfg.enabled:
+        raise HTTPException(404, "OIDC SSO is not enabled")
+    url = await sso.build_oidc_auth_url(cfg)
+    return RedirectResponse(url)
+
+
+@app.get("/auth/sso/oidc/callback")
+async def oidc_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
+    cfg = await sso.get_sso_config(db, "oidc")
+    if not cfg or not cfg.enabled:
+        raise HTTPException(404, "OIDC SSO is not enabled")
+
+    nonce = await sso.consume_oidc_transaction(state)
+    if not nonce:
+        raise HTTPException(400, "Invalid or expired OIDC state — possible CSRF attempt")
+
+    tokens = await sso.exchange_oidc_code(cfg, code)
+    id_token = tokens.get("id_token")
+    if not id_token:
+        raise HTTPException(400, "OIDC provider did not return an id_token")
+
+    claims = await sso.verify_oidc_id_token(cfg, id_token, nonce)
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(400, "OIDC id_token did not include an email claim")
+    full_name = claims.get("name") or email
+
+    user = await _provision_sso_user(db, cfg, "oidc", subject=claims["sub"], email=email, full_name=full_name)
+    exchange_code = await sso.store_exchange_code(str(user.id))
+    return RedirectResponse(f"{settings.frontend_url.rstrip('/')}/sso/callback?code={exchange_code}", status_code=303)
 
 
 # ─── Dashboard ────────────────────────────────────────────────────────────────

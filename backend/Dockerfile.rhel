@@ -11,6 +11,10 @@ RUN microdnf install -y \
     openssl-devel \
     libreoffice-writer \
     libreoffice-calc \
+    libxml2-devel \
+    xmlsec1-devel \
+    xmlsec1-openssl-devel \
+    pkgconf-pkg-config \
     && microdnf clean all
 
 USER 1001
