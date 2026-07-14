@@ -18,7 +18,8 @@ import hashlib
 import hmac
 
 from config import get_settings
-from database import create_tables, get_db
+from database import get_db
+from migrations_runner import run_migrations
 from models import (
     JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
@@ -38,7 +39,10 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await create_tables()
+    # Apply database migrations (auto-stamps a pre-Alembic DB at baseline first,
+    # then upgrades to head). Replaces the old create_all so schema changes ship
+    # safely to existing deployments instead of crashing on missing columns.
+    await run_migrations()
     await seed_data()
     yield
 
