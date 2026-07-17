@@ -115,6 +115,48 @@ class ApiToken(Base):
     user: Mapped["User"] = relationship("User", back_populates="api_tokens")
 
 
+class Note(Base):
+    """
+    A tree of notes per engagement. Mirrors RedNote's tree_nodes shape, plus the
+    fields that let several people's notebooks live side by side:
+
+      source='rednote'  — pushed from RedNote. Read-only in RedTrack; the desktop
+                          app is the source of truth. Lives under a per-user root.
+      source='redtrack' — written here. Fully editable. For people who don't use
+                          RedNote at all.
+
+    Upserts key on (engagement_id, source_project_id, external_id), so re-pushing
+    updates rows in place instead of duplicating. Two testers pushing the same
+    default RedNote template ("Recon & OSINT", "Exploitation", …) land in separate
+    subtrees rather than colliding by title.
+    """
+    __tablename__ = "notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    engagement_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("engagements.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("notes.id", ondelete="CASCADE"), nullable=True, index=True)
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(20), default="note")
+    content: Mapped[str] = mapped_column(Text, default="")
+    icon: Mapped[str] = mapped_column(String(10), default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+
+    source: Mapped[str] = mapped_column(String(20), default="redtrack")
+    owner_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    external_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    source_project_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    owner: Mapped[Optional["User"]] = relationship("User")
+    children: Mapped[list["Note"]] = relationship(
+        "Note", back_populates="parent", cascade="all, delete-orphan", remote_side=None
+    )
+    parent: Mapped[Optional["Note"]] = relationship("Note", back_populates="children", remote_side=[id])
+
+
 class SSOConfig(Base):
     """
     One row per provider ("saml" or "oidc"). Managed entirely through the

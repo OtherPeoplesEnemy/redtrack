@@ -39,6 +39,13 @@ export const authApi = {
   generateApiKey: () => api.post('/auth/api-key'),
 }
 
+export const notesApi = {
+  list: (engId) => api.get(`/engagements/${engId}/notes`),
+  create: (engId, data) => api.post(`/engagements/${engId}/notes`, data),
+  update: (noteId, data) => api.patch(`/notes/${noteId}`, data),
+  remove: (noteId) => api.delete(`/notes/${noteId}`),
+}
+
 export const tokensApi = {
   list: () => api.get('/auth/tokens'),
   create: (name) => api.post('/auth/tokens', { name }),

@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
+from sqlalchemy.orm import selectinload
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from models import (
     JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
-    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig, ApiToken
+    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig, ApiToken, Note
 )
 from auth import (
     hash_password, verify_password, create_access_token, create_refresh_token,
@@ -166,6 +167,190 @@ async def refresh(body: dict, db: AsyncSession = Depends(get_db)):
         "token_type": "bearer",
         "user": _user_out(user),
     }
+
+
+# ─── Notes (Notebook) ─────────────────────────────────────────────────────────
+# A tree per engagement. RedNote pushes land under a per-user root and are
+# read-only here; notes written in RedTrack are editable by anyone.
+
+def _note_out(n: Note) -> dict:
+    return {
+        "id": str(n.id),
+        "parent_id": str(n.parent_id) if n.parent_id else None,
+        "title": n.title,
+        "node_type": n.node_type,
+        "content": n.content or "",
+        "icon": n.icon or "",
+        "sort_order": n.sort_order,
+        "source": n.source,
+        "owner_id": str(n.owner_id) if n.owner_id else None,
+        "owner_name": (n.owner.full_name or n.owner.username) if n.owner else None,
+        "external_id": n.external_id,
+        "source_project_id": n.source_project_id,
+        "updated_at": str(n.updated_at),
+    }
+
+
+@app.get("/engagements/{eng_id}/notes")
+async def list_notes(eng_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Flat list — the client assembles the tree from parent_id.
+    result = await db.execute(
+        select(Note)
+        .options(selectinload(Note.owner))
+        .where(Note.engagement_id == eng_id)
+        .order_by(Note.sort_order, Note.created_at)
+    )
+    return [_note_out(n) for n in result.scalars().all()]
+
+
+@app.post("/engagements/{eng_id}/notes", status_code=201)
+async def create_note(eng_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    note = Note(
+        engagement_id=eng_id,
+        parent_id=uuid.UUID(body["parent_id"]) if body.get("parent_id") else None,
+        title=body.get("title") or "Untitled",
+        node_type=body.get("node_type") or "note",
+        content=body.get("content") or "",
+        icon=body.get("icon") or "📝",
+        sort_order=body.get("sort_order") or 0,
+        source="redtrack",
+        owner_id=current_user.id,
+    )
+    db.add(note)
+    await db.flush()
+    await db.refresh(note, ["owner"])
+    return _note_out(note)
+
+
+@app.patch("/notes/{note_id}")
+async def update_note(note_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    result = await db.execute(select(Note).options(selectinload(Note.owner)).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(404, "Note not found")
+    # RedNote is the source of truth for what it pushes — editing here would be
+    # silently overwritten on the next push, so don't allow it.
+    if note.source == "rednote":
+        raise HTTPException(403, "This note is synced from RedNote and is read-only here. Edit it in RedNote and push again.")
+    for field in ("title", "content", "icon", "node_type", "sort_order"):
+        if field in body:
+            setattr(note, field, body[field])
+    if "parent_id" in body:
+        note.parent_id = uuid.UUID(body["parent_id"]) if body["parent_id"] else None
+    await db.flush()
+    return _note_out(note)
+
+
+@app.delete("/notes/{note_id}", status_code=204)
+async def delete_note(note_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    result = await db.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(404, "Note not found")
+    if note.source == "rednote":
+        raise HTTPException(403, "This note is synced from RedNote. Delete it in RedNote and push again.")
+    await db.delete(note)
+    return None
+
+
+@app.post("/engagements/{eng_id}/notes/sync")
+async def sync_notes(eng_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """
+    Bulk upsert from RedNote. The caller's identity comes from their API token,
+    so a note's owner is whoever pushed it — two testers pushing the same
+    engagement each get their own subtree.
+    """
+    project_id = body.get("project_id")
+    if not project_id:
+        raise HTTPException(400, "project_id is required")
+    project_name = body.get("project_name") or "RedNote"
+    incoming = body.get("nodes") or []
+
+    owner_label = current_user.full_name or current_user.username
+    root_title = f"{project_name} — {owner_label}"
+
+    # Per-user, per-project root. external_id stays NULL to distinguish it from
+    # synced nodes.
+    result = await db.execute(
+        select(Note).where(
+            Note.engagement_id == eng_id,
+            Note.source == "rednote",
+            Note.source_project_id == project_id,
+            Note.owner_id == current_user.id,
+            Note.external_id.is_(None),
+        )
+    )
+    root = result.scalar_one_or_none()
+    if not root:
+        root = Note(
+            engagement_id=eng_id, parent_id=None, title=root_title,
+            node_type="folder", content="", icon="📓", sort_order=0,
+            source="rednote", owner_id=current_user.id,
+            external_id=None, source_project_id=project_id,
+        )
+        db.add(root)
+        await db.flush()
+    else:
+        root.title = root_title  # project may have been renamed in RedNote
+
+    # Existing synced nodes for this user+project, keyed by RedNote node id.
+    result = await db.execute(
+        select(Note).where(
+            Note.engagement_id == eng_id,
+            Note.source == "rednote",
+            Note.source_project_id == project_id,
+            Note.owner_id == current_user.id,
+            Note.external_id.is_not(None),
+        )
+    )
+    existing = {n.external_id: n for n in result.scalars().all()}
+
+    # Pass 1 — upsert every node without touching parents. Nodes can arrive in
+    # any order, so parents may not exist yet.
+    by_ext: dict[str, Note] = {}
+    for node in incoming:
+        ext = node.get("id")
+        if not ext:
+            continue
+        n = existing.get(ext)
+        if n:
+            n.title = node.get("title") or "Untitled"
+            n.node_type = node.get("node_type") or "note"
+            n.content = node.get("content") or ""
+            n.icon = node.get("icon") or ""
+            n.sort_order = node.get("sort_order") or 0
+        else:
+            n = Note(
+                engagement_id=eng_id, title=node.get("title") or "Untitled",
+                node_type=node.get("node_type") or "note",
+                content=node.get("content") or "", icon=node.get("icon") or "",
+                sort_order=node.get("sort_order") or 0,
+                source="rednote", owner_id=current_user.id,
+                external_id=ext, source_project_id=project_id,
+            )
+            db.add(n)
+        by_ext[ext] = n
+    await db.flush()
+
+    # Pass 2 — wire up parents now that every node exists. Top-level RedNote
+    # nodes hang off this user's root.
+    for node in incoming:
+        ext = node.get("id")
+        if not ext or ext not in by_ext:
+            continue
+        parent_ext = node.get("parent_id")
+        by_ext[ext].parent_id = by_ext[parent_ext].id if parent_ext and parent_ext in by_ext else root.id
+
+    # Anything previously synced but no longer sent was deleted in RedNote.
+    incoming_ids = {n.get("id") for n in incoming if n.get("id")}
+    removed = 0
+    for ext, n in existing.items():
+        if ext not in incoming_ids:
+            await db.delete(n)
+            removed += 1
+
+    await db.flush()
+    return {"synced": len(by_ext), "removed": removed, "root_id": str(root.id), "root_title": root_title}
 
 
 # ─── API Tokens ───────────────────────────────────────────────────────────────
