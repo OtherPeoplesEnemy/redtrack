@@ -12,12 +12,10 @@ import FindingDetail from './pages/FindingDetail'
 import Reports from './pages/Reports'
 import VulnDB from './pages/VulnDB'
 import Settings from './pages/Settings'
-import Integrations from './pages/Integrations'
 import TaskLibrary from './pages/TaskLibrary'
 import Management from './pages/Management'
 import Resources from './pages/Resources'
 import Kanban from './pages/Kanban'
-import SSOSettings from './pages/SSOSettings'
 import SSOCallback from './pages/SSOCallback'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } })
@@ -26,14 +24,13 @@ const NAV = [
   { to: '/dashboard', label: 'Dashboard', icon: '⊡' },
   { to: '/engagements', label: 'Engagements', icon: '◈' },
   { to: '/kanban', label: 'Kanban', icon: '⊞' },
-  { to: '/management', label: 'Management', icon: '◎' },
   { to: '/resources', label: 'Resources', icon: '🖥' },
   { to: '/findings', label: 'Findings', icon: '⚑' },
   { to: '/vulndb', label: 'Vuln DB', icon: '◉' },
   { to: '/task-library', label: 'Task Library', icon: '✓' },
   { to: '/reports', label: 'Reports', icon: '◧' },
-  { to: '/integrations', label: 'Integrations', icon: '⟳' },
-  { to: '/sso', label: 'SSO / Auth', icon: '🔐' },
+  // Infrequently used — kept at the bottom, just above Settings.
+  { to: '/management', label: 'Management', icon: '◎' },
   { to: '/settings', label: 'Settings', icon: '◎' },
 ]
 
@@ -117,8 +114,10 @@ function AppRoutes() {
       <Route path="/vulndb" element={<ProtectedRoute><VulnDB /></ProtectedRoute>} />
       <Route path="/task-library" element={<ProtectedRoute><TaskLibrary /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
-      <Route path="/integrations" element={<ProtectedRoute><Integrations /></ProtectedRoute>} />
-      <Route path="/sso" element={<ProtectedRoute><SSOSettings /></ProtectedRoute>} />
+      {/* Integrations and SSO now live under Settings — keep the old paths
+          working so existing links/bookmarks don't 404. */}
+      <Route path="/integrations" element={<Navigate to="/settings?tab=integrations" replace />} />
+      <Route path="/sso" element={<Navigate to="/settings?tab=sso" replace />} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   )

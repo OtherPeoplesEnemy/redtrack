@@ -88,6 +88,31 @@ class User(Base):
 
     findings: Mapped[list["Finding"]] = relationship("Finding", back_populates="tester_user", foreign_keys="Finding.tester_id")
     engagements: Mapped[list["EngagementMember"]] = relationship("EngagementMember", back_populates="user")
+    api_tokens: Mapped[list["ApiToken"]] = relationship("ApiToken", back_populates="user", cascade="all, delete-orphan")
+
+
+class ApiToken(Base):
+    """
+    Named API tokens. A user can hold several (one per machine/tool) and revoke
+    them individually — unlike the old single User.api_key, where generating a
+    new key silently broke every other device.
+
+    The raw token is shown once at creation and never stored: we keep a sha256
+    hash for lookup (deterministic, so it can be indexed and matched on each
+    request) plus a short prefix purely so the UI can show which key is which.
+    """
+    __tablename__ = "api_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped["User"] = relationship("User", back_populates="api_tokens")
 
 
 class SSOConfig(Base):

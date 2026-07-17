@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { ssoApi } from '../api/client'
 import toast from 'react-hot-toast'
 
-export default function SSOSettings() {
+export default function SSOSettings({ embedded = false }) {
   const qc = useQueryClient()
 
   const [samlForm, setSamlForm] = useState({
@@ -88,10 +88,12 @@ export default function SSOSettings() {
   const oidcRedirectUri = `${window.location.origin}/api/auth/sso/oidc/callback`
 
   return (
-    <div style={s.page}>
-      <div style={s.topbar}>
-        <div style={s.title}>Single Sign-On</div>
-      </div>
+    <div style={embedded ? {} : s.page}>
+      {!embedded && (
+        <div style={s.topbar}>
+          <div style={s.title}>Single Sign-On</div>
+        </div>
+      )}
 
       {/* SAML2 */}
       <div style={s.card}>

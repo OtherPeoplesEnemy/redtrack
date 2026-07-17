@@ -24,11 +24,12 @@ from models import (
     JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
-    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig
+    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig, ApiToken
 )
 from auth import (
     hash_password, verify_password, create_access_token, create_refresh_token,
-    decode_token, get_current_user, require_tester_or_above, require_lead_or_admin, require_admin
+    decode_token, get_current_user, require_tester_or_above, require_lead_or_admin, require_admin,
+    generate_api_token
 )
 import sso
 import ai_service
@@ -155,14 +156,73 @@ async def refresh(body: dict, db: AsyncSession = Depends(get_db)):
     payload = decode_token(body["refresh_token"])
     result = await db.execute(select(User).where(User.id == payload["sub"]))
     user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(401, "User not found")
+    # is_active must be checked here too — otherwise deactivating an account
+    # doesn't stop it minting fresh access tokens until the refresh expires.
+    if not user or not user.is_active:
+        raise HTTPException(401, "User not found or inactive")
     return {
         "access_token": create_access_token(str(user.id)),
         "refresh_token": create_refresh_token(str(user.id)),
         "token_type": "bearer",
         "user": _user_out(user),
     }
+
+
+# ─── API Tokens ───────────────────────────────────────────────────────────────
+# Multiple named tokens per user, revocable individually. Replaces the single
+# User.api_key, where regenerating on one machine silently broke every other.
+
+@app.get("/auth/tokens")
+async def list_api_tokens(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(
+        select(ApiToken)
+        .where(ApiToken.user_id == current_user.id, ApiToken.revoked_at.is_(None))
+        .order_by(ApiToken.created_at.desc())
+    )
+    return [
+        {
+            "id": str(t.id),
+            "name": t.name,
+            "prefix": t.prefix,
+            "last_used_at": str(t.last_used_at) if t.last_used_at else None,
+            "created_at": str(t.created_at),
+        }
+        for t in result.scalars().all()
+    ]
+
+
+@app.post("/auth/tokens", status_code=201)
+async def create_api_token(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "A name is required so you can tell your tokens apart")
+
+    raw, token_hash, prefix = generate_api_token()
+    token = ApiToken(user_id=current_user.id, name=name, token_hash=token_hash, prefix=prefix)
+    db.add(token)
+    await db.flush()
+
+    # The raw token is returned exactly once, here. Only the hash is stored.
+    return {
+        "id": str(token.id),
+        "name": token.name,
+        "prefix": token.prefix,
+        "token": raw,
+        "created_at": str(token.created_at),
+    }
+
+
+@app.delete("/auth/tokens/{token_id}", status_code=204)
+async def revoke_api_token(token_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(
+        select(ApiToken).where(ApiToken.id == token_id, ApiToken.user_id == current_user.id)
+    )
+    token = result.scalar_one_or_none()
+    if not token:
+        raise HTTPException(404, "Token not found")
+    # Soft-revoke, so the row survives for audit rather than vanishing.
+    token.revoked_at = datetime.now(timezone.utc)
+    return None
 
 
 @app.get("/auth/me")

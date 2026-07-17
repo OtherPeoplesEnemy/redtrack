@@ -1,7 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { useAuth } from '../hooks/useAuth'
-import api, { authApi } from '../api/client'
+import api, { authApi, tokensApi } from '../api/client'
+import Integrations from './Integrations'
+import SSOSettings from './SSOSettings'
 import toast from 'react-hot-toast'
 
 const ROLE_COLOR = { admin: '#e05252', lead: '#f0883e', tester: '#60a5fa', client: '#6b7899' }
@@ -11,12 +14,27 @@ export default function Settings() {
   const qc = useQueryClient()
   const isAdmin = user?.role === 'admin'
 
-  const [activeTab, setActiveTab] = useState('profile')
+  // ?tab=... lets the old /integrations and /sso routes redirect straight to
+  // the right panel, so existing links and bookmarks keep working.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'profile')
+
+  useEffect(() => {
+    const t = searchParams.get('tab')
+    if (t && t !== activeTab) setActiveTab(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
+
+  function selectTab(id) {
+    setActiveTab(id)
+    setSearchParams(id === 'profile' ? {} : { tab: id }, { replace: true })
+  }
 
   // Profile state
   const [profileForm, setProfileForm] = useState({ full_name: user?.full_name || '', email: user?.email || '' })
   const [pwForm, setPwForm] = useState({ current_password: '', new_password: '', confirm_password: '' })
   const [generatedKey, setGeneratedKey] = useState('')
+  const [newTokenName, setNewTokenName] = useState('')
 
   // User management state
   const [showNewUser, setShowNewUser] = useState(false)
@@ -59,20 +77,34 @@ export default function Settings() {
     }
   )
 
-  async function generateApiKey() {
-    try {
-      const { data } = await authApi.generateApiKey()
-      setGeneratedKey(data.api_key)
-      toast.success('New API key generated')
-    } catch {
-      toast.error('Failed to generate API key')
-    }
-  }
+  // ── API tokens: multiple named keys, revocable individually ──
+  const { data: tokens = [] } = useQuery('api-tokens', () => tokensApi.list().then(r => r.data))
+
+  const createToken = useMutation((name) => tokensApi.create(name).then(r => r.data), {
+    onSuccess: (data) => {
+      // The raw token comes back exactly once — hold it until dismissed.
+      setGeneratedKey(data.token)
+      setNewTokenName('')
+      qc.invalidateQueries('api-tokens')
+      toast.success(`Token "${data.name}" created`)
+    },
+    onError: (e) => toast.error(e.response?.data?.detail || 'Failed to create token'),
+  })
+
+  const revokeToken = useMutation((id) => tokensApi.revoke(id), {
+    onSuccess: () => { qc.invalidateQueries('api-tokens'); toast.success('Token revoked') },
+    onError: () => toast.error('Failed to revoke token'),
+  })
 
   const TABS = [
     { id: 'profile', label: 'My Profile' },
-    { id: 'apikey', label: 'API Key' },
-    ...(isAdmin ? [{ id: 'users', label: 'User Management' }, { id: 'system', label: 'System' }] : []),
+    { id: 'tokens', label: 'API Tokens' },
+    { id: 'integrations', label: 'Integrations' },
+    ...(isAdmin ? [
+      { id: 'sso', label: 'SSO / Auth' },
+      { id: 'users', label: 'User Management' },
+      { id: 'system', label: 'System' },
+    ] : []),
   ]
 
   return (
@@ -85,7 +117,7 @@ export default function Settings() {
         {/* Sidebar tabs */}
         <div style={s.sideNav}>
           {TABS.map(t => (
-            <button key={t.id} onClick={() => setActiveTab(t.id)}
+            <button key={t.id} onClick={() => selectTab(t.id)}
               style={{ ...s.sideNavBtn, ...(activeTab === t.id ? s.sideNavActive : {}) }}>
               {t.label}
             </button>
@@ -147,42 +179,101 @@ export default function Settings() {
           )}
 
           {/* ── API Key ── */}
-          {activeTab === 'apikey' && (
+          {/* ── API Tokens ── */}
+          {activeTab === 'tokens' && (
             <div>
-              <div style={s.sectionTitle}>API Key</div>
+              <div style={s.sectionTitle}>API Tokens</div>
               <div style={s.card}>
                 <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7, marginBottom: 20 }}>
-                  Your API key is used to authenticate <strong style={{ color: 'var(--text)' }}>redtrack-cli</strong> and any other tool integrations.
-                  Generating a new key immediately invalidates the old one.
+                  Tokens authenticate <strong style={{ color: 'var(--text)' }}>RedNote</strong>, <strong style={{ color: 'var(--text)' }}>redtrack-cli</strong>, and other integrations.
+                  Use a separate token per machine or tool so revoking one doesn't break the others.
                 </div>
 
                 {generatedKey && (
                   <div style={{ background: 'var(--surface2)', border: '1px solid var(--green)', borderRadius: 6, padding: 14, marginBottom: 16 }}>
                     <div style={{ fontSize: 9, color: 'var(--green)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 6 }}>
-                      ⚠ Copy this now — it won't be shown again
+                      Copy this now — it won't be shown again
                     </div>
                     <div style={{ fontFamily: 'monospace', fontSize: 13, color: 'var(--green)', wordBreak: 'break-all', letterSpacing: '.05em' }}>
                       {generatedKey}
                     </div>
-                    <button style={{ ...s.btn, marginTop: 10, fontSize: 10 }} onClick={() => { navigator.clipboard.writeText(generatedKey); toast.success('Copied') }}>
-                      Copy to Clipboard
-                    </button>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                      <button style={{ ...s.btn, fontSize: 10 }} onClick={() => { navigator.clipboard.writeText(generatedKey); toast.success('Copied') }}>
+                        Copy to Clipboard
+                      </button>
+                      <button style={{ ...s.btn, fontSize: 10 }} onClick={() => setGeneratedKey('')}>
+                        Done
+                      </button>
+                    </div>
                   </div>
                 )}
 
-                <button style={s.btnPrimary} onClick={generateApiKey}>
-                  {generatedKey ? 'Regenerate API Key' : 'Generate API Key'}
-                </button>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                  <input
+                    style={{ ...s.input, flex: 1 }}
+                    value={newTokenName}
+                    onChange={e => setNewTokenName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && newTokenName.trim()) createToken.mutate(newTokenName.trim()) }}
+                    placeholder="Token name — e.g. RedNote (laptop)"
+                  />
+                  <button
+                    style={{ ...s.btnPrimary, opacity: newTokenName.trim() ? 1 : .5 }}
+                    disabled={!newTokenName.trim() || createToken.isLoading}
+                    onClick={() => createToken.mutate(newTokenName.trim())}>
+                    {createToken.isLoading ? 'Creating…' : '+ New Token'}
+                  </button>
+                </div>
+
+                {tokens.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'var(--muted2)', fontStyle: 'italic', padding: '10px 0' }}>
+                    No active tokens.
+                  </div>
+                ) : (
+                  <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+                    {tokens.map((t, i) => (
+                      <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderTop: i === 0 ? 'none' : '1px solid var(--border)', background: 'var(--surface2)' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, color: 'var(--text)', fontWeight: 600 }}>{t.name}</div>
+                          <div style={{ fontSize: 10, color: 'var(--muted2)', fontFamily: 'monospace', marginTop: 2 }}>{t.prefix}…</div>
+                        </div>
+                        <div style={{ fontSize: 10, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                          {t.last_used_at ? `last used ${new Date(t.last_used_at).toLocaleDateString()}` : 'never used'}
+                        </div>
+                        <button
+                          style={{ ...s.btn, fontSize: 10, color: 'var(--red)', borderColor: 'var(--border2)' }}
+                          onClick={() => { if (window.confirm(`Revoke "${t.name}"? Anything using it will stop working.`)) revokeToken.mutate(t.id) }}>
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div style={{ marginTop: 24, background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: 14 }}>
                   <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.1em', marginBottom: 10 }}>redtrack-cli setup</div>
                   <pre style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.8, margin: 0 }}>
 {`redtrack-cli config
 # Server URL: https://192.168.0.48
-# API Key: <paste your key>`}
+# API Key: <paste your token>`}
                   </pre>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* ── Integrations ── */}
+          {activeTab === 'integrations' && (
+            <div>
+              <div style={s.sectionTitle}>Integrations</div>
+              <Integrations embedded />
+            </div>
+          )}
+
+          {/* ── SSO / Auth (admin only) ── */}
+          {activeTab === 'sso' && isAdmin && (
+            <div>
+              <div style={s.sectionTitle}>SSO / Auth</div>
+              <SSOSettings embedded />
             </div>
           )}
 

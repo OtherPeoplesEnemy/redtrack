@@ -39,6 +39,12 @@ export const authApi = {
   generateApiKey: () => api.post('/auth/api-key'),
 }
 
+export const tokensApi = {
+  list: () => api.get('/auth/tokens'),
+  create: (name) => api.post('/auth/tokens', { name }),
+  revoke: (id) => api.delete(`/auth/tokens/${id}`),
+}
+
 export const ssoApi = {
   status: () => api.get('/auth/sso/status'),
   exchange: (code) => api.post('/auth/sso/exchange', { code }),

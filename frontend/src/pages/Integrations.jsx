@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query'
 import api from '../api/client'
 import toast from 'react-hot-toast'
 
-export default function Integrations() {
+export default function Integrations({ embedded = false }) {
   const qc = useQueryClient()
   const [slackForm, setSlackForm] = useState({ webhook_url: '', base_url: '', signing_secret: '', notify_critical: true, notify_high: true, notify_new_engagement: true, notify_remediated: false })
   const [slackLoaded, setSlackLoaded] = useState(false)
@@ -64,10 +64,12 @@ export default function Integrations() {
   }
 
   return (
-    <div style={s.page}>
-      <div style={s.topbar}>
-        <div style={s.title}>Integrations</div>
-      </div>
+    <div style={embedded ? {} : s.page}>
+      {!embedded && (
+        <div style={s.topbar}>
+          <div style={s.title}>Integrations</div>
+        </div>
+      )}
 
       {/* Slack */}
       <div style={s.card}>
