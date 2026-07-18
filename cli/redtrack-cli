@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-redtrack-cli — RedTrack Connector for Kali Linux & Windows
-Send findings, push Nmap results, and update engagements from the command line.
+redtrack-cli — RedTrack task worklist for the terminal
 
-Usage:
-  redtrack-cli config                          # Set server URL and API key
-  redtrack-cli engagements                     # List active engagements
-  redtrack-cli finding add <engagement_id>     # Add a finding interactively
-  redtrack-cli finding quick                   # Quick add a finding (minimal fields)
-  redtrack-cli nmap <file.xml> <engagement_id> # Import Nmap XML results
-  redtrack-cli hosts list <engagement_id>      # List recon hosts
-  redtrack-cli status                          # Check connection to RedTrack server
+A worklist, not an uploader. Pulls the tasks for an engagement so you can see
+what needs doing, which are yours, and the command each one runs — then fills in
+the target and (with confirmation) runs it for you.
 
-Install:
-  pip install requests python-libnmap colorama
-  chmod +x redtrack-cli
-  ./redtrack-cli config
+Quick start:
+  redtrack-cli config                      # server URL + API token (Settings → API Tokens)
+  redtrack-cli use                         # pick the engagement you're working
+  redtrack-cli tasks                       # the worklist — your tasks starred
+  redtrack-cli show 3                      # full detail for task #3
+  redtrack-cli start 3                     # mark In Progress
+  redtrack-cli run 3 --target 10.10.14.22  # fill <target>, confirm, run, mark Done
+  redtrack-cli done 3                      # mark Done manually
+  redtrack-cli add-standard                # pull standard tasks from the Task Library
 """
 
 import os
+import re
 import sys
-import json
 import argparse
+import subprocess
 import configparser
 from pathlib import Path
 
@@ -33,318 +33,392 @@ except ImportError:
     print("Missing dependencies. Run: pip install requests colorama")
     sys.exit(1)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-
 CONFIG_FILE = Path.home() / ".redtrack" / "config.ini"
 
+C_DIM = Style.DIM
+C_RESET = Style.RESET_ALL
+C_BOLD = Style.BRIGHT
+C_RED = Fore.RED
+C_GREEN = Fore.GREEN
+C_YELLOW = Fore.YELLOW
+C_CYAN = Fore.CYAN
+C_MAGENTA = Fore.MAGENTA
+
+STATUS_COLOR = {"Todo": C_DIM, "In Progress": C_YELLOW, "Blocked": C_RED, "Done": C_GREEN}
+STATUS_MARK = {"Todo": "[ ]", "In Progress": "[~]", "Blocked": "[!]", "Done": "[x]"}
+PRIORITY_COLOR = {"Critical": C_MAGENTA, "High": C_RED, "Medium": C_YELLOW, "Low": C_DIM}
+
+PLACEHOLDERS = ("<target>", "<ip>", "<target-domain>", "<domain>")
+
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+
 def load_config() -> dict:
-    config = configparser.ConfigParser()
     if CONFIG_FILE.exists():
-        config.read(CONFIG_FILE)
+        cfg = configparser.ConfigParser()
+        cfg.read(CONFIG_FILE)
         return {
-            "url": config.get("server", "url", fallback=""),
-            "api_key": config.get("server", "api_key", fallback=""),
+            "url": cfg.get("server", "url", fallback=""),
+            "api_key": cfg.get("server", "api_key", fallback=""),
+            "engagement_id": cfg.get("server", "engagement_id", fallback=""),
+            "engagement_label": cfg.get("server", "engagement_label", fallback=""),
         }
-    return {"url": "", "api_key": ""}
+    return {"url": "", "api_key": "", "engagement_id": "", "engagement_label": ""}
 
-def save_config(url: str, api_key: str):
+
+def save_config(**kw):
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    config = configparser.ConfigParser()
-    config["server"] = {"url": url.rstrip("/"), "api_key": api_key}
+    cfg = configparser.ConfigParser()
+    if CONFIG_FILE.exists():
+        cfg.read(CONFIG_FILE)
+    if "server" not in cfg:
+        cfg["server"] = {}
+    for k, v in kw.items():
+        cfg["server"][k] = v
     with open(CONFIG_FILE, "w") as f:
-        config.write(f)
-    os.chmod(CONFIG_FILE, 0o600)
-    print(f"{Fore.GREEN}[✓] Config saved to {CONFIG_FILE}")
+        cfg.write(f)
 
-# ─── API Client ───────────────────────────────────────────────────────────────
 
-class RedTrackClient:
-    def __init__(self):
-        cfg = load_config()
-        self.base_url = cfg["url"]
-        self.api_key = cfg["api_key"]
-        if not self.base_url or not self.api_key:
-            print(f"{Fore.RED}[!] Not configured. Run: redtrack-cli config")
-            sys.exit(1)
-        self.session = requests.Session()
-        self.session.headers.update({
-            "X-API-Key": self.api_key,
-            "Content-Type": "application/json",
-        })
-        self.session.verify = False  # Self-signed cert
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def die(msg):
+    print(f"{C_RED}✗ {msg}{C_RESET}")
+    sys.exit(1)
 
-    def get(self, path: str) -> dict:
-        r = self.session.get(f"{self.base_url}/api{path}")
-        r.raise_for_status()
-        return r.json()
 
-    def post(self, path: str, data: dict) -> dict:
-        r = self.session.post(f"{self.base_url}/api{path}", json=data)
-        r.raise_for_status()
-        return r.json()
+# ─── API ──────────────────────────────────────────────────────────────────────
 
-    def patch(self, path: str, data: dict) -> dict:
-        r = self.session.patch(f"{self.base_url}/api{path}", json=data)
-        r.raise_for_status()
-        return r.json()
+class API:
+    def __init__(self, cfg):
+        self.base = cfg["url"].rstrip("/")
+        self.key = cfg["api_key"]
+        if not self.base or not self.key:
+            die("Not configured. Run:  redtrack-cli config")
+        self.s = requests.Session()
+        self.s.headers.update({"X-API-Key": self.key})
+        self.s.verify = False
+        requests.packages.urllib3.disable_warnings()
+
+    def _url(self, path):
+        return f"{self.base}/api{path}"
+
+    def get(self, path):
+        return self._handle(self._req("get", path))
+
+    def post(self, path, json_body=None):
+        return self._handle(self._req("post", path, json=json_body))
+
+    def patch(self, path, json_body=None):
+        return self._handle(self._req("patch", path, json=json_body))
+
+    def _req(self, method, path, **kw):
+        try:
+            return getattr(self.s, method)(self._url(path), timeout=15, **kw)
+        except requests.exceptions.ConnectionError:
+            die(f"Can't reach RedTrack at {self.base}. Is the server up and the URL right? (redtrack-cli config)")
+        except requests.exceptions.Timeout:
+            die(f"RedTrack timed out at {self.base}.")
+        except requests.exceptions.RequestException as e:
+            die(f"Request failed: {e}")
+
+    def _handle(self, r):
+        if r.status_code == 401:
+            die("Unauthorized — check your API token (Settings → API Tokens).")
+        if not r.ok:
+            die(f"RedTrack error {r.status_code}: {r.text[:200]}")
+        return r.json() if r.text else None
+
+
+# ─── Command extraction ───────────────────────────────────────────────────────
+# When a Task Library item is imported, its command lands in the task description
+# as a "**Tools:**" block. Pull it back out so we can show/fill/run it.
+
+def extract_command(task) -> str:
+    desc = task.get("description") or ""
+    m = re.search(r"\*\*Tools:\*\*\s*\n?(.+)", desc, re.DOTALL)
+    if m:
+        for line in m.group(1).strip().splitlines():
+            line = line.strip().strip("`")
+            if line:
+                return line
+    return ""
+
+
+def clean_description(task) -> str:
+    desc = task.get("description") or ""
+    return re.split(r"\*\*Tools:\*\*", desc)[0].strip()
+
+
+# ─── Identity / engagement ────────────────────────────────────────────────────
+
+def whoami(api):
+    me = api.get("/auth/me")
+    return me.get("full_name") or me.get("username") or ""
+
+
+def is_mine(task, my_name):
+    a = (task.get("assignee") or "").strip().lower()
+    return bool(a) and a == my_name.strip().lower()
+
+
+def require_engagement(cfg):
+    if not cfg.get("engagement_id"):
+        die("No engagement selected. Run:  redtrack-cli use")
+    return cfg["engagement_id"]
+
+
+def load_tasks(api, eng_id):
+    tasks = api.get(f"/tasks/{eng_id}") or []
+    prio_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    tasks.sort(key=lambda t: (t.get("status") == "Done", prio_rank.get(t.get("priority"), 9)))
+    return tasks
+
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_config(args):
-    print(f"\n{Fore.CYAN}RedTrack CLI Configuration{Style.RESET_ALL}")
-    print("─" * 40)
-    current = load_config()
-    url = input(f"Server URL [{current['url'] or 'https://192.168.0.48'}]: ").strip()
-    api_key = input(f"API Key [{current['api_key'][:8] + '...' if current['api_key'] else 'not set'}]: ").strip()
-    if not url:
-        url = current["url"] or "https://192.168.0.48"
-    if not api_key:
-        api_key = current["api_key"]
-    save_config(url, api_key)
+    cur = load_config()
+    print(f"{C_BOLD}RedTrack CLI configuration{C_RESET}")
+    url = input(f"Server URL [{cur['url'] or 'https://192.168.0.48'}]: ").strip() or cur["url"] or "https://192.168.0.48"
+    shown = (cur["api_key"][:10] + "…") if cur["api_key"] else "not set"
+    key = input(f"API token [{shown}]: ").strip() or cur["api_key"]
+    if not key:
+        die("An API token is required (RedTrack → Settings → API Tokens → New Token).")
+    save_config(url=url.rstrip("/"), api_key=key)
+    api = API(load_config())
+    print(f"{C_GREEN}✓ Connected as {whoami(api)}{C_RESET}")
+    print(f"Next: {C_CYAN}redtrack-cli use{C_RESET} to pick an engagement.")
+
+
+def cmd_use(args):
+    api = API(load_config())
+    engs = api.get("/engagements/") or []
+    active = [e for e in engs if str(e.get("status", "")).lower() in ("active", "planning")]
+    pool = active or engs
+    if not pool:
+        die("No engagements found.")
+    print(f"{C_BOLD}Select an engagement:{C_RESET}")
+    for i, e in enumerate(pool, 1):
+        print(f"  {C_CYAN}{i:2}{C_RESET}  {e.get('ref_id','?')}  {C_BOLD}{e.get('name','')}{C_RESET}  {C_DIM}({e.get('client','')}){C_RESET}")
+    choice = input("Number: ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(pool)):
+        die("Invalid selection.")
+    e = pool[int(choice) - 1]
+    label = f"{e.get('ref_id','')} — {e.get('name','')}"
+    save_config(engagement_id=e["id"], engagement_label=label)
+    print(f"{C_GREEN}✓ Working engagement: {label}{C_RESET}")
+    print(f"Now: {C_CYAN}redtrack-cli tasks{C_RESET}")
+
+
+def cmd_tasks(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+    my_name = whoami(api)
+    tasks = load_tasks(api, eng_id)
+
+    if not tasks:
+        print(f"{C_DIM}No tasks for {cfg.get('engagement_label','this engagement')}.{C_RESET}")
+        print(f"Pull the standard set with:  {C_CYAN}redtrack-cli add-standard{C_RESET}")
+        return
+
+    print(f"{C_BOLD}{cfg.get('engagement_label','Tasks')}{C_RESET}  {C_DIM}(* = yours){C_RESET}\n")
+    done = sum(1 for t in tasks if t.get("status") == "Done")
+    for i, t in enumerate(tasks, 1):
+        status = t.get("status", "Todo")
+        sc = STATUS_COLOR.get(status, "")
+        mark = STATUS_MARK.get(status, "[ ]")
+        mine = "*" if is_mine(t, my_name) else " "
+        prio = t.get("priority", "")
+        pc = PRIORITY_COLOR.get(prio, "")
+        cmd = extract_command(t)
+        cmd_hint = f"   {C_DIM}{cmd}{C_RESET}" if cmd else ""
+        title_style = C_BOLD if is_mine(t, my_name) else ""
+        print(f" {C_CYAN}{i:2}{C_RESET} {mine} {sc}{mark}{C_RESET} {title_style}{t.get('title','')}{C_RESET}  {pc}{prio}{C_RESET}{cmd_hint}")
+
+    print(f"\n{C_DIM}{done}/{len(tasks)} done · show <n> · start <n> · run <n> --target <t> · done <n>{C_RESET}")
+
+
+def _resolve_task(api, eng_id, index):
+    tasks = load_tasks(api, eng_id)
+    if not str(index).isdigit() or not (1 <= int(index) <= len(tasks)):
+        die(f"No task #{index}. Run 'redtrack-cli tasks' to see the list.")
+    return tasks[int(index) - 1]
+
+
+def cmd_show(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+    t = _resolve_task(api, eng_id, args.index)
+
+    print(f"{C_BOLD}{t.get('title','')}{C_RESET}")
+    print(f"{C_DIM}status:{C_RESET} {STATUS_COLOR.get(t.get('status'),'')}{t.get('status')}{C_RESET}"
+          f"   {C_DIM}priority:{C_RESET} {t.get('priority')}"
+          f"   {C_DIM}assignee:{C_RESET} {t.get('assignee') or '—'}")
+    desc = clean_description(t)
+    if desc:
+        print(f"\n{desc}")
+    cmd = extract_command(t)
+    if cmd:
+        print(f"\n{C_BOLD}command:{C_RESET}\n  {C_CYAN}{cmd}{C_RESET}")
+        if any(ph in cmd for ph in PLACEHOLDERS):
+            print(f"\n{C_DIM}run it with:  redtrack-cli run {args.index} --target <value>{C_RESET}")
+
+
+def _set_status(api, task, status):
+    api.patch(f"/tasks/task/{task['id']}", {"status": status})
+
+
+def cmd_start(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+    t = _resolve_task(api, eng_id, args.index)
+    _set_status(api, t, "In Progress")
+    print(f"{C_YELLOW}[~] {t.get('title','')} → In Progress{C_RESET}")
+
+
+def cmd_done(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+    t = _resolve_task(api, eng_id, args.index)
+    _set_status(api, t, "Done")
+    print(f"{C_GREEN}[x] {t.get('title','')} → Done{C_RESET}")
+
+
+def cmd_run(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+    t = _resolve_task(api, eng_id, args.index)
+
+    cmd = extract_command(t)
+    if not cmd:
+        die("This task has no associated command.")
+
+    filled = cmd
+    for ph in PLACEHOLDERS:
+        if ph in filled:
+            if not args.target:
+                die(f"This command needs a target. Add:  --target <value>   (placeholder {ph})")
+            filled = filled.replace(ph, args.target)
+
+    remaining = re.findall(r"<[^>]+>", filled)
+    if remaining:
+        print(f"{C_YELLOW}⚠ Unfilled placeholders: {', '.join(remaining)}{C_RESET}")
+
+    print(f"\n{C_BOLD}Task:{C_RESET} {t.get('title','')}")
+    print(f"{C_BOLD}Command:{C_RESET}\n  {C_CYAN}{filled}{C_RESET}\n")
+
+    ans = input("Run this command? [y/N] ").strip().lower()
+    if ans != "y":
+        print(f"{C_DIM}Not run. Command left above for you to copy.{C_RESET}")
+        return
+    if remaining:
+        die("Refusing to run a command with unfilled placeholders.")
+
+    _set_status(api, t, "In Progress")
+    print(f"{C_DIM}── running ──{C_RESET}")
+    try:
+        proc = subprocess.run(filled, shell=True)
+    except KeyboardInterrupt:
+        print(f"\n{C_YELLOW}Interrupted — task left In Progress.{C_RESET}")
+        return
+
+    if proc.returncode == 0:
+        _set_status(api, t, "Done")
+        print(f"\n{C_GREEN}✓ Exit 0 — marked Done.{C_RESET}")
+    else:
+        print(f"\n{C_YELLOW}Exit {proc.returncode} — left In Progress, not marking Done.{C_RESET}")
+
+
+def cmd_add_standard(args):
+    cfg = load_config()
+    api = API(cfg)
+    eng_id = require_engagement(cfg)
+
+    templates = api.get("/task-library/") or []
+    if not templates:
+        die("No task templates found in the library.")
+
+    cats = {}
+    for t in templates:
+        cats.setdefault(t.get("category", "Other"), []).append(t)
+
+    print(f"{C_BOLD}Task Library categories:{C_RESET}")
+    cat_list = sorted(cats.keys())
+    for i, c in enumerate(cat_list, 1):
+        print(f"  {C_CYAN}{i:2}{C_RESET}  {c}  {C_DIM}({len(cats[c])} tasks){C_RESET}")
+    print(f"  {C_CYAN} 0{C_RESET}  All categories")
+
+    choice = input("Add which category? [number]: ").strip()
+    if not choice.isdigit():
+        die("Cancelled.")
+    choice = int(choice)
+    if choice == 0:
+        chosen = templates
+    elif 1 <= choice <= len(cat_list):
+        chosen = cats[cat_list[choice - 1]]
+    else:
+        die("Invalid selection.")
+
+    print(f"Importing {len(chosen)} task(s)…")
+    added = 0
+    for t in chosen:
+        try:
+            api.post(f"/task-library/{t['id']}/import/{eng_id}")
+            added += 1
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+    print(f"{C_GREEN}✓ Added {added} task(s). Run 'redtrack-cli tasks' to see them.{C_RESET}")
 
 
 def cmd_status(args):
-    client = RedTrackClient()
-    try:
-        r = client.get("/health")
-        print(f"{Fore.GREEN}[✓] Connected to {client.base_url}")
-        print(f"    Service: {r.get('service')} v{r.get('version')}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Connection failed: {e}")
+    cfg = load_config()
+    api = API(cfg)
+    print(f"{C_GREEN}✓ Connected to {cfg['url']} as {whoami(api)}{C_RESET}")
+    if cfg.get("engagement_label"):
+        print(f"  Engagement: {cfg['engagement_label']}")
+    else:
+        print(f"  {C_DIM}No engagement selected — run 'redtrack-cli use'{C_RESET}")
 
 
-def cmd_engagements(args):
-    client = RedTrackClient()
-    engs = client.get("/engagements/")
-    if not engs:
-        print(f"{Fore.YELLOW}[!] No engagements found")
-        return
-    print(f"\n{Fore.CYAN}{'ID':<12} {'Ref':<10} {'Client':<20} {'Name':<30} {'Type':<15} {'Status'}")
-    print("─" * 100)
-    for e in engs:
-        status_color = Fore.GREEN if e["status"] == "Active" else Fore.YELLOW if e["status"] == "Planning" else Fore.WHITE
-        print(f"{str(e['id'])[:8]:<12} {e['ref_id']:<10} {e['client'][:18]:<20} {e['name'][:28]:<30} {e['type']:<15} {status_color}{e['status']}")
-
-
-def cmd_finding_add(args):
-    client = RedTrackClient()
-    eng_id = args.engagement_id
-
-    print(f"\n{Fore.CYAN}Add Finding to Engagement{Style.RESET_ALL}")
-    print("─" * 40)
-
-    title = input("Title: ").strip()
-    if not title:
-        print(f"{Fore.RED}[!] Title is required")
-        return
-
-    print("Severity [1=Critical, 2=High, 3=Medium, 4=Low, 5=Info]: ", end="")
-    sev_map = {"1": "Critical", "2": "High", "3": "Medium", "4": "Low", "5": "Info"}
-    sev = sev_map.get(input().strip(), "High")
-
-    cvss = input("CVSS Score (0.0-10.0, or Enter to skip): ").strip()
-    cwe = input("CWE (e.g. CWE-89, or Enter to skip): ").strip()
-    affected = input("Affected Component: ").strip()
-    description = input("Description: ").strip()
-    steps = input("Steps to Reproduce (brief): ").strip()
-    remediation = input("Remediation: ").strip()
-
-    payload = {
-        "title": title,
-        "severity": sev,
-        "cvss_score": float(cvss) if cvss else None,
-        "cwe": cwe or None,
-        "affected_component": affected or None,
-        "description": description or None,
-        "steps_to_reproduce": steps or None,
-        "remediation": remediation or None,
-        "source": "cli",
-    }
-
-    try:
-        result = client.post(f"/findings/{eng_id}", payload)
-        print(f"\n{Fore.GREEN}[✓] Finding added: {result['ref_id']} — {result['title']}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Failed to add finding: {e}")
-
-
-def cmd_finding_quick(args):
-    """Quick one-liner finding submission."""
-    client = RedTrackClient()
-
-    engs = client.get("/engagements/")
-    active = [e for e in engs if e["status"] == "Active"]
-    if not active:
-        print(f"{Fore.RED}[!] No active engagements")
-        return
-
-    print(f"\n{Fore.CYAN}Active Engagements:{Style.RESET_ALL}")
-    for i, e in enumerate(active):
-        print(f"  {i+1}. {e['ref_id']} — {e['client']} ({e['name']})")
-
-    idx = input("\nSelect engagement number: ").strip()
-    try:
-        eng = active[int(idx) - 1]
-    except (ValueError, IndexError):
-        print(f"{Fore.RED}[!] Invalid selection")
-        return
-
-    title = input("Finding title: ").strip()
-    sev_map = {"c": "Critical", "h": "High", "m": "Medium", "l": "Low", "i": "Info"}
-    sev_input = input("Severity [c/h/m/l/i]: ").strip().lower()
-    sev = sev_map.get(sev_input, "High")
-
-    payload = {"title": title, "severity": sev, "source": "cli"}
-
-    try:
-        result = client.post(f"/findings/{eng['id']}", payload)
-        print(f"{Fore.GREEN}[✓] {result['ref_id']} added to {eng['ref_id']}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Error: {e}")
-
-
-def cmd_nmap(args):
-    """Import Nmap XML results into the Recon tab of an engagement."""
-    try:
-        from libnmap.parser import NmapParser
-    except ImportError:
-        print(f"{Fore.RED}[!] python-libnmap required: pip install python-libnmap")
-        sys.exit(1)
-
-    client = RedTrackClient()
-    xml_file = args.xml_file
-    eng_id = args.engagement_id
-
-    if not Path(xml_file).exists():
-        print(f"{Fore.RED}[!] File not found: {xml_file}")
-        return
-
-    print(f"{Fore.CYAN}[*] Parsing Nmap results from {xml_file}...")
-
-    report = NmapParser.parse_fromfile(xml_file)
-    hosts_added = 0
-
-    for host in report.hosts:
-        if host.status != "up":
-            continue
-
-        ports = []
-        services = []
-        for svc in host.services:
-            ports.append(svc.port)
-            services.append({
-                "port": svc.port,
-                "protocol": svc.protocol,
-                "state": svc.state,
-                "service": svc.service,
-                "banner": svc.banner,
-            })
-
-        payload = {
-            "ip_address": host.address,
-            "hostname": host.hostnames[0] if host.hostnames else None,
-            "os": host.os_match_probabilities()[0].name if host.os_match_probabilities() else None,
-            "ports": ports,
-            "services": services,
-            "status": "up",
-            "source": "nmap",
-        }
-
-        try:
-            client.post(f"/recon/{eng_id}/hosts", payload)
-            hosts_added += 1
-            print(f"  {Fore.GREEN}[+] {host.address} — {len(ports)} ports")
-        except Exception as e:
-            print(f"  {Fore.RED}[!] Failed to add {host.address}: {e}")
-
-    print(f"\n{Fore.GREEN}[✓] Imported {hosts_added} hosts to engagement")
-    print(f"    View in RedTrack: Engagements → Recon tab")
-
-
-def cmd_hosts_list(args):
-    client = RedTrackClient()
-    try:
-        hosts = client.get(f"/recon/{args.engagement_id}/hosts")
-        if not hosts:
-            print(f"{Fore.YELLOW}[!] No hosts found for this engagement")
-            return
-        print(f"\n{Fore.CYAN}{'IP Address':<18} {'Hostname':<30} {'OS':<25} {'Ports'}")
-        print("─" * 90)
-        for h in hosts:
-            ports = ", ".join(str(p) for p in (h.get("ports") or [])[:10])
-            print(f"{h['ip_address']:<18} {(h.get('hostname') or '—')[:28]:<30} {(h.get('os') or '—')[:23]:<25} {ports}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Error: {e}")
-
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Entry ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="redtrack-cli",
-        description="RedTrack CLI — Send findings and recon data to RedTrack",
-    )
-    subparsers = parser.add_subparsers(dest="command")
+    p = argparse.ArgumentParser(prog="redtrack-cli", description="RedTrack task worklist")
+    sub = p.add_subparsers(dest="cmd")
 
-    # config
-    subparsers.add_parser("config", help="Configure server URL and API key")
+    sub.add_parser("config", help="Set server URL and API token")
+    sub.add_parser("status", help="Show connection and current engagement")
+    sub.add_parser("use", help="Pick the engagement to work on")
+    sub.add_parser("tasks", help="Show the task worklist")
+    sub.add_parser("add-standard", help="Import standard tasks from the Task Library")
 
-    # status
-    subparsers.add_parser("status", help="Check connection to RedTrack server")
+    for name, helptext in [
+        ("show", "Show full detail for a task"),
+        ("start", "Mark a task In Progress"),
+        ("done", "Mark a task Done"),
+    ]:
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument("index", help="Task number from 'tasks'")
 
-    # engagements
-    subparsers.add_parser("engagements", help="List active engagements")
+    runp = sub.add_parser("run", help="Fill target, confirm, run a task's command")
+    runp.add_argument("index", help="Task number from 'tasks'")
+    runp.add_argument("--target", "-t", default="", help="Value for <target>/<ip> placeholders")
 
-    # finding
-    finding_parser = subparsers.add_parser("finding", help="Manage findings")
-    finding_sub = finding_parser.add_subparsers(dest="finding_cmd")
-
-    add_parser = finding_sub.add_parser("add", help="Add a finding interactively")
-    add_parser.add_argument("engagement_id", help="Engagement UUID")
-
-    finding_sub.add_parser("quick", help="Quick add a finding")
-
-    # nmap
-    nmap_parser = subparsers.add_parser("nmap", help="Import Nmap XML results")
-    nmap_parser.add_argument("xml_file", help="Path to Nmap XML output file")
-    nmap_parser.add_argument("engagement_id", help="Engagement UUID")
-
-    # hosts
-    hosts_parser = subparsers.add_parser("hosts", help="Manage recon hosts")
-    hosts_sub = hosts_parser.add_subparsers(dest="hosts_cmd")
-    list_parser = hosts_sub.add_parser("list", help="List recon hosts")
-    list_parser.add_argument("engagement_id", help="Engagement UUID")
-
-    args = parser.parse_args()
-
-    print(f"{Fore.RED}{'─'*50}")
-    print(f"{Fore.RED}  RedTrack CLI  {Fore.WHITE}Pentest Management Connector")
-    print(f"{Fore.RED}{'─'*50}{Style.RESET_ALL}")
-
-    if args.command == "config":
-        cmd_config(args)
-    elif args.command == "status":
-        cmd_status(args)
-    elif args.command == "engagements":
-        cmd_engagements(args)
-    elif args.command == "finding":
-        if args.finding_cmd == "add":
-            cmd_finding_add(args)
-        elif args.finding_cmd == "quick":
-            cmd_finding_quick(args)
-        else:
-            finding_parser.print_help()
-    elif args.command == "nmap":
-        cmd_nmap(args)
-    elif args.command == "hosts":
-        if args.hosts_cmd == "list":
-            cmd_hosts_list(args)
-        else:
-            hosts_parser.print_help()
-    else:
-        parser.print_help()
+    args = p.parse_args()
+    dispatch = {
+        "config": cmd_config, "status": cmd_status, "use": cmd_use,
+        "tasks": cmd_tasks, "show": cmd_show, "start": cmd_start,
+        "done": cmd_done, "run": cmd_run, "add-standard": cmd_add_standard,
+    }
+    if not args.cmd:
+        p.print_help()
+        return
+    dispatch[args.cmd](args)
 
 
 if __name__ == "__main__":
