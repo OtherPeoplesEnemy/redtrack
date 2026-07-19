@@ -43,6 +43,77 @@ SEV_HEX = {
 }
 
 
+# ── Evidence helpers ──────────────────────────────────────────────────────────
+
+def _ev_get(e, attr):
+    return e.get(attr) if isinstance(e, dict) else getattr(e, attr, None)
+
+
+def _is_image(e):
+    mime = (_ev_get(e, "mime_type") or "").lower()
+    if mime.startswith("image/"):
+        return True
+    name = (_ev_get(e, "original_name") or _ev_get(e, "filename") or "").lower()
+    return name.endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"))
+
+
+def _evidence_path(e):
+    # Evidence.filename stores the absolute on-disk path in this codebase.
+    p = _ev_get(e, "filename")
+    if p and Path(p).exists():
+        return p
+    return None
+
+
+def _ev_caption(e):
+    return _ev_get(e, "caption")
+
+
+def _ev_name(e):
+    return _ev_get(e, "original_name") or "evidence"
+
+
+# ── PTES band-weighted risk scoring ───────────────────────────────────────────
+# Mirrors the model used on real engagements: each severity band contributes a
+# weight, the weighted total is squashed onto a 1–15 PTES scale, and the scale
+# maps to a named risk band. Weights are tuned so a single Critical dominates a
+# handful of Lows, matching how a client actually perceives aggregate risk.
+
+PTES_BAND_WEIGHTS = {"Critical": 5.0, "High": 3.0, "Medium": 2.0, "Low": 1.0, "Info": 0.25}
+PTES_MAX = 15.0
+
+PTES_BANDS = [
+    (13.0, "Extreme"),
+    (10.0, "Critical"),
+    (7.0,  "High"),
+    (4.0,  "Moderate"),
+    (1.0,  "Low"),
+    (0.0,  "Minimal"),
+]
+
+
+def compute_ptes_score(sev_counts):
+    """
+    Returns {'score': float 0–15, 'band': str, 'weighted_raw': float}.
+
+    weighted_raw = sum(count × band weight). It's mapped onto the 0–15 PTES
+    scale with a saturating curve so the score doesn't require an implausible
+    number of findings to reach the top band — a couple of Criticals plus
+    supporting Highs already lands in 'Extreme', consistent with manual scoring.
+    """
+    import math
+    weighted_raw = sum(sev_counts.get(band, 0) * w for band, w in PTES_BAND_WEIGHTS.items())
+    k = 0.14  # tuned so ~1 Critical + 2 High ≈ 13.0 (Extreme)
+    score = round(PTES_MAX * (1 - math.exp(-k * weighted_raw)), 1)
+
+    band = "Minimal"
+    for threshold, name in PTES_BANDS:
+        if score >= threshold:
+            band = name
+            break
+    return {"score": score, "band": band, "weighted_raw": round(weighted_raw, 1)}
+
+
 def _set_cell_bg(cell, hex_color):
     """Set table cell background color."""
     tc = cell._tc
@@ -92,7 +163,7 @@ def _add_para(doc, text, bold=False, size=None, color=None, align=None):
     return p
 
 
-async def generate_docx_report(eng, findings, report, template_path: Optional[str] = None) -> str:
+async def generate_docx_report(eng, findings, report, template_path: Optional[str] = None, evidence_map=None) -> str:
     """
     Generate a .docx pentest report.
     If template_path is provided, uses it as a base and fills placeholders.
@@ -101,7 +172,7 @@ async def generate_docx_report(eng, findings, report, template_path: Optional[st
     if template_path and Path(template_path).exists():
         return await _generate_from_template(eng, findings, report, template_path)
     else:
-        return await _generate_default_report(eng, findings, report)
+        return await _generate_default_report(eng, findings, report, evidence_map or {})
 
 
 async def _generate_from_template(eng, findings, report, template_path: str) -> str:
@@ -176,7 +247,8 @@ async def _generate_from_template(eng, findings, report, template_path: str) -> 
     return str(output_path)
 
 
-async def _generate_default_report(eng, findings, report) -> str:
+async def _generate_default_report(eng, findings, report, evidence_map=None) -> str:
+    evidence_map = evidence_map or {}
     """Generate a full default branded report."""
     doc = Document()
 
@@ -298,6 +370,37 @@ async def _generate_default_report(eng, findings, report) -> str:
         vcell.paragraphs[0].runs[0].bold = True
         vcell.paragraphs[0].runs[0].font.size = Pt(14)
 
+    # PTES band-weighted overall risk score.
+    ptes = compute_ptes_score(sev_counts)
+    doc.add_paragraph()
+    score_p = doc.add_paragraph()
+    score_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r1 = score_p.add_run("Overall Risk (PTES weighted): ")
+    r1.bold = True
+    r1.font.size = Pt(12)
+    r2 = score_p.add_run("%s / 15  " % ptes["score"])
+    r2.bold = True
+    r2.font.size = Pt(14)
+    band_color = {
+        "Extreme": RGBColor(0x8E, 0x1B, 0x1B), "Critical": RGBColor(0xC0, 0x39, 0x2B),
+        "High": RGBColor(0xE6, 0x7E, 0x22), "Moderate": RGBColor(0xF3, 0x9C, 0x12),
+        "Low": RGBColor(0x27, 0xAE, 0x60), "Minimal": RGBColor(0x29, 0x80, 0xB9),
+    }.get(ptes["band"], RGBColor(0x1A, 0x1A, 0x2E))
+    r3 = score_p.add_run("(%s)" % ptes["band"])
+    r3.bold = True
+    r3.font.size = Pt(14)
+    r3.font.color.rgb = band_color
+
+    note_p = doc.add_paragraph()
+    note_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    nr = note_p.add_run(
+        "Band-weighted PTES score (Critical ×5, High ×3, Medium ×2, Low ×1, Info ×0.25), "
+        "normalized to a 1–15 scale."
+    )
+    nr.italic = True
+    nr.font.size = Pt(8)
+    nr.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+
     doc.add_page_break()
 
     # ── Scope & Methodology ───────────────────────────────────────────────────
@@ -391,6 +494,39 @@ async def _generate_default_report(eng, findings, report) -> str:
                 run.bold = True
                 run.font.size = Pt(10)
                 p.add_run(content).font.size = Pt(10)
+
+        # Embedded evidence — the images uploaded to this finding (from RedNote,
+        # Burp, or the RedTrack UI). This is what turns a text finding into
+        # something a client can actually verify.
+        ev_items = evidence_map.get(str(f.id), [])
+        image_items = [e for e in ev_items if _is_image(e)]
+        if image_items:
+            ep = doc.add_paragraph()
+            er = ep.add_run("Evidence:")
+            er.bold = True
+            er.font.size = Pt(10)
+            for e in image_items:
+                path = _evidence_path(e)
+                if not path:
+                    continue
+                try:
+                    doc.add_picture(path, width=Inches(6.0))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception:
+                    # A corrupt/unsupported image shouldn't sink the whole report.
+                    cap = doc.add_paragraph()
+                    cr = cap.add_run("[evidence image could not be embedded: %s]" % _ev_name(e))
+                    cr.italic = True
+                    cr.font.size = Pt(8)
+                    continue
+                caption = _ev_caption(e) or _ev_name(e)
+                if caption:
+                    capp = doc.add_paragraph()
+                    capp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    cr = capp.add_run(caption)
+                    cr.italic = True
+                    cr.font.size = Pt(8)
+                    cr.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
 
         if idx < len(sorted_findings):
             doc.add_paragraph()

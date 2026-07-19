@@ -1038,6 +1038,14 @@ async def generate_report(report_id: uuid.UUID, template_id: Optional[str] = Non
         raise HTTPException(404, "Not found")
     eng = (await db.execute(select(Engagement).where(Engagement.id == r.engagement_id))).scalar_one_or_none()
     findings = (await db.execute(select(Finding).where(Finding.engagement_id == eng.id))).scalars().all()
+    # Load evidence per finding so images can be embedded in the report. Keyed
+    # by finding id (as str) to match how the generator looks them up.
+    evidence_map = {}
+    if findings:
+        finding_ids = [f.id for f in findings]
+        ev_rows = (await db.execute(select(Evidence).where(Evidence.finding_id.in_(finding_ids)))).scalars().all()
+        for ev in ev_rows:
+            evidence_map.setdefault(str(ev.finding_id), []).append(ev)
     try:
         from report_service import generate_docx_report
         template_path = None
@@ -1046,7 +1054,7 @@ async def generate_report(report_id: uuid.UUID, template_id: Optional[str] = Non
             tp = Path(settings.upload_dir) / "report_templates" / template_id
             if tp.exists():
                 template_path = str(tp)
-        path = await generate_docx_report(eng, findings, r, template_path)
+        path = await generate_docx_report(eng, findings, r, template_path, evidence_map=evidence_map)
         r.file_path = path
         r.generated_at = datetime.now(timezone.utc)
         return {"message": "Report generated", "report_id": str(report_id), "file_path": path}
