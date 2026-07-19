@@ -207,26 +207,85 @@ async def _generate_from_template(eng, findings, report, template_path: str) -> 
         "{{client_contact}}": eng.client_contact or "",
         "{{client_email}}": eng.client_email or "",
         "{{ref_id}}": eng.ref_id or "",
+        "{{ptes_score}}": str(compute_ptes_score(sev_counts)["score"]),
+        "{{ptes_band}}": compute_ptes_score(sev_counts)["band"],
     }
 
-    # Replace in all paragraphs
-    for para in doc.paragraphs:
+    # Replace placeholders. Word often splits a placeholder like {{ptes_score}}
+    # across several runs, so a naive per-run replace misses it. But we must NOT
+    # flatten a whole paragraph's formatting (the dashboard has big-red + small-
+    # grey runs in one paragraph). So: only when a placeholder spans multiple
+    # runs do we merge exactly those runs, and only for the placeholder's span.
+    def _replace_in_paragraph(para):
+        if not para.runs:
+            return
+        # Fast path: placeholder fully inside one run.
+        for run in para.runs:
+            for key, val in replacements.items():
+                if key in run.text:
+                    run.text = run.text.replace(key, val)
+        # Slow path: any placeholder still present across run boundaries?
+        joined = "".join(r.text for r in para.runs)
+        if not any(k in joined for k in replacements):
+            return
+        # Rebuild run text offsets and, for each unresolved placeholder, write the
+        # replacement into the run where it starts and blank the spanned tail.
         for key, val in replacements.items():
-            if key in para.text:
-                for run in para.runs:
-                    if key in run.text:
-                        run.text = run.text.replace(key, val)
+            guard = 0
+            while key in "".join(r.text for r in para.runs) and guard < 50:
+                guard += 1
+                runs = para.runs
+                texts = [r.text for r in runs]
+                combined = "".join(texts)
+                start = combined.find(key)
+                end = start + len(key)
+                # Map char offsets back to runs.
+                pos = 0
+                start_run = end_run = None
+                start_off = end_off = 0
+                for i, t in enumerate(texts):
+                    nxt = pos + len(t)
+                    if start_run is None and start < nxt:
+                        start_run, start_off = i, start - pos
+                    if end <= nxt:
+                        end_run, end_off = i, end - pos
+                        break
+                    pos = nxt
+                if start_run is None or end_run is None:
+                    break
+                if start_run == end_run:
+                    runs[start_run].text = texts[start_run].replace(key, val, 1)
+                else:
+                    runs[start_run].text = texts[start_run][:start_off] + val
+                    for i in range(start_run + 1, end_run):
+                        runs[i].text = ""
+                    runs[end_run].text = texts[end_run][end_off:]
 
-    # Replace in tables
+    for para in doc.paragraphs:
+        _replace_in_paragraph(para)
+
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    for key, val in replacements.items():
-                        if key in para.text:
-                            for run in para.runs:
-                                if key in run.text:
-                                    run.text = run.text.replace(key, val)
+                    _replace_in_paragraph(para)
+
+    # Headers and footers carry the client name / ref id too, and live in
+    # separate parts the body loop never touches. Process every section's
+    # header and footer (including first-page and even-page variants).
+    for section in doc.sections:
+        for hf in (section.header, section.footer,
+                   section.first_page_header, section.first_page_footer,
+                   section.even_page_header, section.even_page_footer):
+            if hf is None:
+                continue
+            for para in hf.paragraphs:
+                _replace_in_paragraph(para)
+            for table in hf.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            _replace_in_paragraph(para)
 
     # Insert findings table where {{findings_table}} placeholder appears
     for i, para in enumerate(doc.paragraphs):
