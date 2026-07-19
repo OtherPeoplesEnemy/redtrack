@@ -170,12 +170,12 @@ async def generate_docx_report(eng, findings, report, template_path: Optional[st
     Otherwise generates a default branded report.
     """
     if template_path and Path(template_path).exists():
-        return await _generate_from_template(eng, findings, report, template_path)
+        return await _generate_from_template(eng, findings, report, template_path, evidence_map or {})
     else:
         return await _generate_default_report(eng, findings, report, evidence_map or {})
 
 
-async def _generate_from_template(eng, findings, report, template_path: str) -> str:
+async def _generate_from_template(eng, findings, report, template_path: str, evidence_map=None) -> str:
     """Fill a user-uploaded .docx template with report data."""
     doc = Document(template_path)
 
@@ -298,7 +298,7 @@ async def _generate_from_template(eng, findings, report, template_path: str) -> 
     for i, para in enumerate(doc.paragraphs):
         if "{{findings_detail}}" in para.text:
             para.text = ""
-            _insert_findings_detail_after(doc, para, findings)
+            _insert_findings_detail_after(doc, para, findings, evidence_map or {})
             break
 
     output_path = REPORTS_DIR / f"{uuid.uuid4().hex}.docx"
@@ -659,24 +659,106 @@ def _insert_findings_table_after(doc, para, findings):
     _insert_findings_summary_table(doc, sorted_findings)
 
 
-def _insert_findings_detail_after(doc, para, findings):
-    """Insert detailed findings after a placeholder paragraph in a template."""
-    sorted_findings = sorted(findings, key=lambda f: {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}.get(
-        f.severity.value if hasattr(f.severity, 'value') else str(f.severity), 5))
-    for f in sorted_findings:
-        sev = f.severity.value if hasattr(f.severity, 'value') else str(f.severity)
-        doc.add_heading(f"{f.ref_id} — {f.title}", 2)
-        for label, content in [
-            ("Severity", sev), ("CVSS", str(f.cvss_score) if f.cvss_score else None),
-            ("CWE", f.cwe), ("Affected Component", f.affected_component),
-            ("Description", f.description), ("Impact", f.impact),
-            ("Steps to Reproduce", f.steps_to_reproduce), ("Remediation", f.remediation),
-        ]:
+def _insert_findings_detail_after(doc, para, findings, evidence_map=None):
+    """
+    Render each finding as the 'Executive Dashboard' style block: a severity-
+    colored title bar, a metadata table (Severity / CVSS 3.1 / MITRE ATT&CK /
+    System / Status), then Description / Technical Detail / Evidence /
+    Recommendations. Loops over every finding, each drawn with its own values.
+    """
+    evidence_map = evidence_map or {}
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}.get(
+            f.severity.value if hasattr(f.severity, "value") else str(f.severity), 5),
+    )
+
+    for i, f in enumerate(sorted_findings, 1):
+        sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+        status = f.status.value if hasattr(f.status, "value") else str(f.status)
+        sev_hex = SEV_HEX.get(sev, "1B2A4A")
+
+        # ── Title bar (single-cell table, severity-colored) ──
+        title_tbl = doc.add_table(rows=1, cols=1)
+        title_tbl.autofit = True
+        tcell = title_tbl.rows[0].cells[0]
+        _set_cell_bg(tcell, sev_hex)
+        tp = tcell.paragraphs[0]
+        r = tp.add_run("%d  %s  " % (i, f.title))
+        r.bold = True
+        r.font.size = Pt(13)
+        r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        r2 = tp.add_run("[%s]" % sev.upper())
+        r2.bold = True
+        r2.font.size = Pt(10)
+        r2.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+        # ── Metadata table ──
+        mitre = getattr(f, "mitre_atlas_ttp", None) or ""
+        meta_rows = [
+            ("Severity", sev),
+            ("CVSS 3.1", ("%s (%s)" % (f.cvss_score, f.cvss_vector)) if f.cvss_score and f.cvss_vector
+                         else (str(f.cvss_score) if f.cvss_score else "—")),
+            ("MITRE ATT&CK", mitre or "—"),
+            ("System", f.affected_component or "—"),
+            ("Status", status),
+        ]
+        mtbl = doc.add_table(rows=len(meta_rows), cols=2)
+        _set_table_borders(mtbl)
+        for ri, (label, val) in enumerate(meta_rows):
+            lcell = mtbl.rows[ri].cells[0]
+            vcell = mtbl.rows[ri].cells[1]
+            _set_cell_bg(lcell, "F4F6F9")
+            lp = lcell.paragraphs[0]
+            lr = lp.add_run(label)
+            lr.bold = True
+            lr.font.size = Pt(10)
+            lr.font.color.rgb = RGBColor(0x1B, 0x2A, 0x4A)
+            vp = vcell.paragraphs[0]
+            vr = vp.add_run(val)
+            vr.font.size = Pt(10)
+        # narrow label column
+        for row in mtbl.rows:
+            row.cells[0].width = Inches(1.6)
+            row.cells[1].width = Inches(4.9)
+
+        doc.add_paragraph()
+
+        # ── Content sections ──
+        sections = [
+            ("Description", f.description),
+            ("Technical Detail", f.steps_to_reproduce),
+            ("Recommendations", f.remediation),
+        ]
+        for label, content in sections:
             if content:
-                p = doc.add_paragraph()
-                run = p.add_run(label + ": ")
-                run.bold = True
-                p.add_run(content)
+                h = doc.add_heading(label, level=3)
+                bp = doc.add_paragraph()
+                bp.add_run(content).font.size = Pt(10)
+
+        # ── Evidence (embedded images) ──
+        ev_items = [e for e in evidence_map.get(str(f.id), []) if _is_image(e)]
+        if ev_items:
+            doc.add_heading("Evidence", level=3)
+            for e in ev_items:
+                path = _evidence_path(e)
+                if not path:
+                    continue
+                try:
+                    doc.add_picture(path, width=Inches(6.0))
+                    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                except Exception:
+                    continue
+                cap = _ev_caption(e) or _ev_name(e)
+                if cap:
+                    cp = doc.add_paragraph()
+                    cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    cr = cp.add_run(cap)
+                    cr.italic = True
+                    cr.font.size = Pt(8)
+                    cr.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+        doc.add_paragraph()
 
 
 async def convert_to_pdf(docx_path: str) -> Optional[str]:
