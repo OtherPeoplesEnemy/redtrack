@@ -294,6 +294,10 @@ async def _generate_from_template(eng, findings, report, template_path: str, evi
             _insert_key_findings_after(doc, para, findings)
             break
 
+    # Bespoke dashboard sections, pulled from engagement.report_dashboard.
+    dash = getattr(eng, "report_dashboard", None) or {}
+    _insert_dashboard_sections(doc, dash)
+
     # Insert findings table where {{findings_table}} placeholder appears
     for i, para in enumerate(doc.paragraphs):
         if "{{findings_table}}" in para.text:
@@ -623,6 +627,192 @@ async def _generate_default_report(eng, findings, report, evidence_map=None) -> 
     output_path = REPORTS_DIR / f"{uuid.uuid4().hex}.docx"
     doc.save(str(output_path))
     return str(output_path)
+
+
+def _find_marker_para(doc, marker):
+    for para in doc.paragraphs:
+        if marker in para.text:
+            return para
+    # Markers can also live inside table cells (the dashboard is table-heavy).
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    if marker in para.text:
+                        return para
+    return None
+
+
+def _insert_dashboard_sections(doc, dash):
+    """
+    Render the bespoke dashboard sections from engagement.report_dashboard into
+    the template wherever their markers appear. Each is optional: if the marker
+    isn't in the template or the data is empty, that section is skipped and the
+    marker (if present) is cleared.
+    """
+    _inject_kpi_callouts(doc, dash.get("kpi_callouts", []))
+    _inject_risk_matrix(doc, dash.get("risk_matrix", {}))
+    _inject_attack_chain(doc, dash.get("attack_chain", []))
+    _inject_remediation(doc, dash.get("remediation", []))
+    _inject_defensive_controls(doc, dash.get("defensive_controls", []))
+
+
+def _inject_kpi_callouts(doc, callouts):
+    para = _find_marker_para(doc, "{{dashboard_callouts}}")
+    if para is None:
+        return
+    para.text = ""
+    if not callouts:
+        return
+    table = doc.add_table(rows=1, cols=len(callouts))
+    anchor = para._p
+    for i, c in enumerate(callouts):
+        cell = table.rows[0].cells[i]
+        vp = cell.paragraphs[0]
+        vr = vp.add_run(str(c.get("value", "")))
+        vr.bold = True
+        vr.font.size = Pt(20)
+        vr.font.color.rgb = RGBColor(0xC0, 0x39, 0x2B)
+        lp = cell.add_paragraph()
+        lr = lp.add_run(str(c.get("label", "")))
+        lr.bold = True
+        lr.font.size = Pt(9)
+        if c.get("note"):
+            npp = cell.add_paragraph()
+            nr = npp.add_run(str(c["note"]))
+            nr.font.size = Pt(8)
+            nr.font.color.rgb = RGBColor(0x5A, 0x62, 0x72)
+    anchor.addnext(table._tbl)
+
+
+def _inject_risk_matrix(doc, matrix):
+    para = _find_marker_para(doc, "{{risk_matrix}}")
+    if para is None:
+        return
+    para.text = ""
+    if not matrix:
+        return
+    # 4x4: header row/col + 3x3 body. Rows = impact (High/Med/Low), cols = likelihood.
+    table = doc.add_table(rows=4, cols=4)
+    _set_table_borders(table)
+    corner = table.rows[0].cells[0]
+    corner.text = ""
+    heads = ["Low", "Med", "High"]
+    for j, h in enumerate(heads):
+        c = table.rows[0].cells[j + 1]
+        c.text = h + " impact"
+        c.paragraphs[0].runs[0].bold = True
+        c.paragraphs[0].runs[0].font.size = Pt(8)
+        c.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    rows = [("High", "high"), ("Med", "med"), ("Low", "low")]
+    cols = [("low", "Low"), ("med", "Med"), ("high", "High")]
+    # cell color by risk level (row index + col index)
+    tint = ["27AE60", "F39C12", "F39C12", "E67E22", "C0392B"]
+    for ri, (rlabel, rkey) in enumerate(rows):
+        lc = table.rows[ri + 1].cells[0]
+        lc.text = rlabel
+        lc.paragraphs[0].runs[0].bold = True
+        lc.paragraphs[0].runs[0].font.size = Pt(8)
+        for ci, (ckey, _) in enumerate(cols):
+            key = "%s_%s" % (rkey, ckey)
+            val = matrix.get(key, 0)
+            cell = table.rows[ri + 1].cells[ci + 1]
+            level = (2 - ri) + ci  # 0..4 rough risk band
+            _set_cell_bg(cell, tint[min(level, 4)])
+            cp = cell.paragraphs[0]
+            cr = cp.add_run(str(val))
+            cr.bold = True
+            cr.font.size = Pt(12)
+            cr.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    anchor = para._p
+    anchor.addnext(table._tbl)
+
+
+def _inject_attack_chain(doc, chain):
+    para = _find_marker_para(doc, "{{attack_chain}}")
+    if para is None:
+        return
+    para.text = ""
+    if not chain:
+        return
+    table = doc.add_table(rows=1, cols=4)
+    _set_table_borders(table)
+    for i, h in enumerate(["#", "Action", "Detail", "Outcome"]):
+        c = table.rows[0].cells[i]
+        c.text = h
+        c.paragraphs[0].runs[0].bold = True
+        c.paragraphs[0].runs[0].font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        c.paragraphs[0].runs[0].font.size = Pt(9)
+        _set_cell_bg(c, "1B2A4A")
+    for i, step in enumerate(chain, 1):
+        row = table.add_row()
+        vals = [str(i), step.get("step", ""), step.get("detail", ""), step.get("outcome", "")]
+        for j, v in enumerate(vals):
+            cell = row.cells[j]
+            cell.text = v
+            cell.paragraphs[0].runs[0].font.size = Pt(9)
+            if j == 1:
+                cell.paragraphs[0].runs[0].bold = True
+    anchor = para._p
+    anchor.addnext(table._tbl)
+
+
+def _inject_remediation(doc, items):
+    para = _find_marker_para(doc, "{{remediation}}")
+    if para is None:
+        return
+    para.text = ""
+    if not items:
+        return
+    table = doc.add_table(rows=0, cols=2)
+    _set_table_borders(table)
+    pri_color = {"P0": "C0392B", "P1": "E67E22", "P2": "F39C12", "P3": "2980B9"}
+    for item in items:
+        row = table.add_row()
+        pcell = row.cells[0]
+        pr_label = item.get("priority", "")
+        pcell.text = pr_label
+        pcell.paragraphs[0].runs[0].bold = True
+        pcell.paragraphs[0].runs[0].font.size = Pt(9)
+        pcell.width = Inches(1.2)
+        key = pr_label.split()[0].replace("—", "").strip()[:2]
+        _set_cell_bg(pcell, pri_color.get(key, "F4F6F9"))
+        pcell.paragraphs[0].runs[0].font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        icell = row.cells[1]
+        icell.text = item.get("items", "")
+        icell.paragraphs[0].runs[0].font.size = Pt(9)
+        icell.width = Inches(5.3)
+    anchor = para._p
+    anchor.addnext(table._tbl)
+
+
+def _inject_defensive_controls(doc, controls):
+    para = _find_marker_para(doc, "{{defensive_controls}}")
+    if para is None:
+        return
+    para.text = ""
+    if not controls:
+        return
+    table = doc.add_table(rows=0, cols=2)
+    _set_table_borders(table)
+    for c in controls:
+        row = table.add_row()
+        mark = row.cells[0]
+        passed = c.get("status") == "pass"
+        mr = mark.paragraphs[0].add_run("PASS" if passed else "FAIL")
+        mr.bold = True
+        mr.font.size = Pt(8)
+        mr.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+        _set_cell_bg(mark, "1A7A4A" if passed else "C0392B")
+        mark.width = Inches(0.7)
+        mark.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        tcell = row.cells[1]
+        tcell.text = c.get("text", "")
+        tcell.paragraphs[0].runs[0].font.size = Pt(9)
+        tcell.width = Inches(5.8)
+    anchor = para._p
+    anchor.addnext(table._tbl)
 
 
 def _insert_key_findings_after(doc, para, findings):

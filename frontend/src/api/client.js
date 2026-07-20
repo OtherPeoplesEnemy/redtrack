@@ -39,6 +39,11 @@ export const authApi = {
   generateApiKey: () => api.post('/auth/api-key'),
 }
 
+export const reportDashboardApi = {
+  get: (engId) => api.get(`/engagements/${engId}/report-dashboard`),
+  save: (engId, data) => api.put(`/engagements/${engId}/report-dashboard`, data),
+}
+
 export const notesApi = {
   list: (engId) => api.get(`/engagements/${engId}/notes`),
   create: (engId, data) => api.post(`/engagements/${engId}/notes`, data),

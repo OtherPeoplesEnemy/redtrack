@@ -11,9 +11,10 @@ import TaskBoard from './TaskBoard'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 import Notebook from '../components/Notebook'
+import ReportDashboard from '../components/ReportDashboard'
 
-const TABS = ['Overview', 'Scope', 'Recon', 'Findings', 'Tasks', 'Notes', 'Notebook', 'Team', 'Jump Boxes', 'Reports', 'MITRE']
-const AI_TABS = ['Overview', 'Scope', 'Recon', 'Kill Chain', 'Findings', 'Tasks', 'Notes', 'Notebook', 'Team', 'Reports', 'MITRE ATLAS']
+const TABS = ['Overview', 'Scope', 'Recon', 'Findings', 'Tasks', 'Notes', 'Notebook', 'Team', 'Jump Boxes', 'Reports', 'Report Dashboard', 'MITRE']
+const AI_TABS = ['Overview', 'Scope', 'Recon', 'Kill Chain', 'Findings', 'Tasks', 'Notes', 'Notebook', 'Team', 'Reports', 'Report Dashboard', 'MITRE ATLAS']
 
 const SEV_COLOR = { Critical: '#e05252', High: '#f0883e', Medium: '#fbbf24', Low: '#60a5fa', Info: '#6b7899' }
 
@@ -688,6 +689,11 @@ export default function EngagementDetail() {
         {/* ── Notebook (RedNote tree + native notes) ── */}
         {tab === 'Notebook' && (
           <Notebook engagementId={id} />
+        )}
+
+        {/* ── Report Dashboard ── */}
+        {tab === 'Report Dashboard' && (
+          <ReportDashboard engagementId={id} />
         )}
 
         {/* ── Team ── */}

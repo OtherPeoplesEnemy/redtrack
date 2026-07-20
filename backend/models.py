@@ -207,6 +207,12 @@ class Engagement(Base):
     recon_hosts: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
     recon_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Bespoke report dashboard data (KPI callouts, risk matrix, attack chain,
+    # remediation timeline, defensive controls). Populated via the Report
+    # Dashboard tab and rendered into the report template. One JSON blob keeps
+    # the whole editable dashboard together and avoids a migration per section.
+    report_dashboard: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=dict)
+
     # Notes & timeline
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

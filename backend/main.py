@@ -794,6 +794,48 @@ async def delete_engagement(eng_id: uuid.UUID, db: AsyncSession = Depends(get_db
     await db.delete(eng)
 
 
+# ─── Report dashboard (bespoke per-engagement report sections) ─────────────────
+
+def _default_dashboard() -> dict:
+    return {
+        "kpi_callouts": [],          # [{label, value, note}]
+        "risk_matrix": {},           # {high_high: n, high_med: n, ... low_low: n}
+        "attack_chain": [],          # [{step, detail, outcome}]
+        "remediation": [],           # [{priority, items}]
+        "defensive_controls": [],    # [{status: 'pass'|'fail', text}]
+        "positive_controls_count": 0,
+    }
+
+
+@app.get("/engagements/{eng_id}/report-dashboard")
+async def get_report_dashboard(eng_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Engagement).where(Engagement.id == eng_id))
+    eng = result.scalar_one_or_none()
+    if not eng:
+        raise HTTPException(404, "Not found")
+    data = eng.report_dashboard or {}
+    # Merge onto defaults so the form always gets every key.
+    merged = _default_dashboard()
+    merged.update(data)
+    return merged
+
+
+@app.put("/engagements/{eng_id}/report-dashboard")
+async def save_report_dashboard(eng_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    result = await db.execute(select(Engagement).where(Engagement.id == eng_id))
+    eng = result.scalar_one_or_none()
+    if not eng:
+        raise HTTPException(404, "Not found")
+    # Store only the known keys, so the form can't inject arbitrary fields.
+    allowed = set(_default_dashboard().keys())
+    clean = {k: v for k, v in body.items() if k in allowed}
+    eng.report_dashboard = clean
+    # SQLAlchemy needs a nudge to persist an in-place JSON reassignment.
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(eng, "report_dashboard")
+    return clean
+
+
 async def _eng_out(eng, db):
     total = await db.scalar(select(func.count(Finding.id)).where(Finding.engagement_id == eng.id)) or 0
     crit = await db.scalar(select(func.count(Finding.id)).where(and_(Finding.engagement_id == eng.id, Finding.severity == Severity.critical))) or 0
