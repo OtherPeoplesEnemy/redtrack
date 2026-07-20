@@ -287,6 +287,13 @@ async def _generate_from_template(eng, findings, report, template_path: str, evi
                         for para in cell.paragraphs:
                             _replace_in_paragraph(para)
 
+    # Insert key findings (top 5 by severity) where {{key_findings}} appears
+    for i, para in enumerate(doc.paragraphs):
+        if "{{key_findings}}" in para.text:
+            para.text = ""
+            _insert_key_findings_after(doc, para, findings)
+            break
+
     # Insert findings table where {{findings_table}} placeholder appears
     for i, para in enumerate(doc.paragraphs):
         if "{{findings_table}}" in para.text:
@@ -618,13 +625,41 @@ async def _generate_default_report(eng, findings, report, evidence_map=None) -> 
     return str(output_path)
 
 
-def _insert_findings_summary_table(doc, findings):
-    table = doc.add_table(rows=1, cols=5)
-    table.style = 'Table Grid'
+def _insert_key_findings_after(doc, para, findings):
+    """
+    Top 5 findings by severity, as bullets: 'Title  [SEVERITY]'. Inserted where
+    {{key_findings}} appears in a template.
+    """
+    order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+    ranked = sorted(
+        findings,
+        key=lambda f: order.get(f.severity.value if hasattr(f.severity, "value") else str(f.severity), 5),
+    )[:5]
 
-    # Header row
-    headers = ["ID", "Title", "Severity", "CVSS", "Status"]
-    widths = [Inches(0.7), Inches(3.5), Inches(1.0), Inches(0.7), Inches(1.0)]
+    anchor = para._p
+    for f in ranked:
+        sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+        p = doc.add_paragraph()
+        b = p.add_run("•  ")
+        b.font.size = Pt(10)
+        r = p.add_run(f.title)
+        r.font.size = Pt(10)
+        r2 = p.add_run("  [%s]" % sev.upper())
+        r2.bold = True
+        r2.font.size = Pt(9)
+        r2.font.color.rgb = SEV_COLORS.get(sev, RGBColor(0x1B, 0x2A, 0x4A))
+        anchor.addnext(p._p)
+        anchor = p._p
+
+
+def _insert_findings_summary_table(doc, findings):
+    # Matches the template's summary layout: #  /  Finding  /  Severity  /  CVSS  /  Status,
+    # navy header, severity-colored severity cell.
+    table = doc.add_table(rows=1, cols=5)
+    _set_table_borders(table)
+
+    headers = ["#", "Finding", "Severity", "CVSS", "Status"]
+    widths = [Inches(0.4), Inches(3.8), Inches(1.0), Inches(0.7), Inches(1.0)]
     hrow = table.rows[0]
     for i, (h, w) in enumerate(zip(headers, widths)):
         cell = hrow.cells[i]
@@ -633,20 +668,24 @@ def _insert_findings_summary_table(doc, findings):
         cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         cell.paragraphs[0].runs[0].font.size = Pt(9)
         cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _set_cell_bg(cell, "1A1A2E")
+        _set_cell_bg(cell, "1B2A4A")
         cell.width = w
 
-    for f in findings:
-        sev = f.severity.value if hasattr(f.severity, 'value') else str(f.severity)
-        status = f.status.value if hasattr(f.status, 'value') else str(f.status)
+    order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+    ranked = sorted(findings, key=lambda f: order.get(
+        f.severity.value if hasattr(f.severity, "value") else str(f.severity), 5))
+
+    for idx, f in enumerate(ranked, 1):
+        sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+        status = f.status.value if hasattr(f.status, "value") else str(f.status)
         row = table.add_row()
-        vals = [f.ref_id, f.title, sev, str(f.cvss_score) if f.cvss_score else "—", status]
+        vals = [str(idx), f.title, sev, str(f.cvss_score) if f.cvss_score else "—", status]
         for i, (val, w) in enumerate(zip(vals, widths)):
             cell = row.cells[i]
             cell.text = val
             cell.paragraphs[0].runs[0].font.size = Pt(9)
             cell.width = w
-            if i == 2:  # Severity
+            if i == 2:  # severity cell — color it
                 cell.paragraphs[0].runs[0].font.color.rgb = SEV_COLORS.get(sev, RGBColor(0, 0, 0))
                 cell.paragraphs[0].runs[0].bold = True
                 cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
