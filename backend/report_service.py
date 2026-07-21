@@ -73,14 +73,43 @@ def _ev_name(e):
     return _ev_get(e, "original_name") or "evidence"
 
 
-# ── PTES band-weighted risk scoring ───────────────────────────────────────────
-# Mirrors the model used on real engagements: each severity band contributes a
-# weight, the weighted total is squashed onto a 1–15 PTES scale, and the scale
-# maps to a named risk band. Weights are tuned so a single Critical dominates a
-# handful of Lows, matching how a client actually perceives aggregate risk.
+# ── PTES weighted risk scoring (1–15) ─────────────────────────────────────────
+# The methodology used on real engagements: each finding is scored Likelihood ×
+# Impact (1–3 each → 1–9), weighted by its risk band, and the engagement score is
+# the ratio of total weighted risk to the maximum possible, normalized to 0–15.
+# Positive controls apply a credit reduction. This is a saturating-free, additive
+# model — it reflects "how bad was this engagement" without diluting catastrophic
+# findings the way a naive average does.
+#
+#   Weighted Score = Σ(finding_score × band_weight) / Σ(max_score × band_weight)
+#   normalized to 0–15, then minus (positive_controls × per-control credit)
+#
+# RedTrack stores severity (not separate L and I), so severity maps to a
+# representative L×I and band. Since severity already derives from CVSS, this
+# doesn't double-count exploitability/impact.
 
-PTES_BAND_WEIGHTS = {"Critical": 5.0, "High": 3.0, "Medium": 2.0, "Low": 1.0, "Info": 0.25}
-PTES_MAX = 15.0
+# severity -> (band name, band weight, representative L×I finding score 1–9)
+PTES_SEVERITY_MAP = {
+    "Critical": ("Extreme",  5.0, 9),   # L3 × I3
+    "High":     ("High",     3.0, 6),   # L3 × I2 / L2 × I3
+    "Medium":   ("Elevated", 2.0, 4),   # L2 × I2
+    "Low":      ("Moderate", 1.0, 2),   # L2 × I1 / L1 × I2
+    "Info":     ("Low",      0.5, 1),   # L1 × I1
+}
+# The single worst finding of each severity sets a baseline on the 0–15 scale.
+# This is what makes the score "driven by the worst findings": one Critical
+# already anchors the engagement in the Extreme band; additional findings add
+# only bounded headroom above that floor, never dilute it.
+PTES_SEVERITY_BASE = {
+    "Critical": 13.0,   # Extreme floor
+    "High":     9.0,    # High floor
+    "Medium":   6.0,    # Elevated floor
+    "Low":      3.0,    # Moderate floor
+    "Info":     1.0,    # Low floor
+}
+PTES_SCALE = 15.0
+PTES_VOLUME_K = 150.0              # how fast additional findings fill the headroom
+PTES_PC_CREDIT_PER_CONTROL = 0.3   # positive-control credit (Reed: 7 x 0.3 = 2.1)
 
 PTES_BANDS = [
     (13.0, "Extreme"),
@@ -91,28 +120,60 @@ PTES_BANDS = [
     (0.0,  "Minimal"),
 ]
 
+_SEV_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
 
-def compute_ptes_score(sev_counts):
+
+def compute_ptes_score(sev_counts, positive_controls=0):
     """
-    Returns {'score': float 0–15, 'band': str, 'weighted_raw': float}.
+    Band-weighted PTES risk score (0-15), driven by the worst findings.
 
-    weighted_raw = sum(count × band weight). It's mapped onto the 0–15 PTES
-    scale with a saturating curve so the score doesn't require an implausible
-    number of findings to reach the top band — a couple of Criticals plus
-    supporting Highs already lands in 'Extreme', consistent with manual scoring.
+    The engagement's risk is anchored by its single most severe finding - full
+    domain compromise or major data exposure puts the score in the Extreme band
+    regardless of how many medium/low findings pad the list. Additional findings
+    add bounded headroom above that floor (a saturating bonus), so volume lifts
+    the score toward 15 but can never dilute the catastrophic ones the way a
+    naive average would. Positive controls apply a credit reduction.
+
+      base   = floor for the single worst severity present
+      bonus  = (15 - base) * (1 - exp(-weighted_rest / K))
+      score  = base + bonus - positive_controls * credit
+
+    Returns {'score', 'band', 'weighted_raw', 'pc_credit', 'base'}.
     """
     import math
-    weighted_raw = sum(sev_counts.get(band, 0) * w for band, w in PTES_BAND_WEIGHTS.items())
-    k = 0.14  # tuned so ~1 Critical + 2 High ≈ 13.0 (Extreme)
-    score = round(PTES_MAX * (1 - math.exp(-k * weighted_raw)), 1)
+    present = [s for s in _SEV_ORDER if sev_counts.get(s, 0) > 0]
+    if not present:
+        return {"score": 0.0, "band": "Minimal", "weighted_raw": 0.0, "pc_credit": 0.0, "base": 0.0}
+
+    worst = present[0]
+    base = PTES_SEVERITY_BASE[worst]
+
+    weighted_rest = 0.0
+    for sev in present:
+        n = sev_counts[sev]
+        if sev == worst:
+            n -= 1
+        _, weight, fscore = PTES_SEVERITY_MAP[sev]
+        weighted_rest += n * fscore * weight
+
+    headroom = PTES_SCALE - base
+    bonus = headroom * (1 - math.exp(-weighted_rest / PTES_VOLUME_K)) if weighted_rest > 0 else 0.0
+
+    pc_credit = positive_controls * PTES_PC_CREDIT_PER_CONTROL
+    score = max(0.0, round(base + bonus - pc_credit, 1))
 
     band = "Minimal"
     for threshold, name in PTES_BANDS:
         if score >= threshold:
             band = name
             break
-    return {"score": score, "band": band, "weighted_raw": round(weighted_raw, 1)}
-
+    weighted_raw = weighted_rest + PTES_SEVERITY_MAP[worst][2] * PTES_SEVERITY_MAP[worst][1]
+    return {
+        "score": score, "band": band,
+        "weighted_raw": round(weighted_raw, 1),
+        "pc_credit": round(pc_credit, 1),
+        "base": base,
+    }
 
 def _set_cell_bg(cell, hex_color):
     """Set table cell background color."""
@@ -182,6 +243,11 @@ async def _generate_from_template(eng, findings, report, template_path: str, evi
     sev_counts = {s: sum(1 for f in findings if f.severity.value == s) for s in ["Critical", "High", "Medium", "Low", "Info"]}
     open_count = sum(1 for f in findings if f.status.value == "Open")
 
+    # Positive-control count comes from the engagement's report dashboard, if set.
+    _dash = getattr(eng, "report_dashboard", None) or {}
+    _positive_controls = _dash.get("positive_controls_count", 0) or 0
+    _ptes = compute_ptes_score(sev_counts, _positive_controls)
+
     replacements = {
         "{{client_name}}": eng.client or "",
         "{{engagement_name}}": eng.name or "",
@@ -207,8 +273,8 @@ async def _generate_from_template(eng, findings, report, template_path: str, evi
         "{{client_contact}}": eng.client_contact or "",
         "{{client_email}}": eng.client_email or "",
         "{{ref_id}}": eng.ref_id or "",
-        "{{ptes_score}}": str(compute_ptes_score(sev_counts)["score"]),
-        "{{ptes_band}}": compute_ptes_score(sev_counts)["band"],
+        "{{ptes_score}}": str(_ptes["score"]),
+        "{{ptes_band}}": _ptes["band"],
     }
 
     # Replace placeholders. Word often splits a placeholder like {{ptes_score}}
@@ -441,7 +507,8 @@ async def _generate_default_report(eng, findings, report, evidence_map=None) -> 
         vcell.paragraphs[0].runs[0].font.size = Pt(14)
 
     # PTES band-weighted overall risk score.
-    ptes = compute_ptes_score(sev_counts)
+    _pc = (getattr(eng, "report_dashboard", None) or {}).get("positive_controls_count", 0) or 0
+    ptes = compute_ptes_score(sev_counts, _pc)
     doc.add_paragraph()
     score_p = doc.add_paragraph()
     score_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
