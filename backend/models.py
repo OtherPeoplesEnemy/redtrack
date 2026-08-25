@@ -77,6 +77,9 @@ class User(Base):
     avatar_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     api_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
     theme: Mapped[str] = mapped_column(String(10), default="dark")
+    # Injected into provisioned jump box VMs at boot via cloud-init.
+    # Never baked into a golden template.
+    ssh_public_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -448,6 +451,21 @@ class JumpBox(Base):
     checkout_notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     auto_release_hours: Mapped[int] = mapped_column(default=8)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # ── VM provisioning ───────────────────────────────────────────────
+    # A row with ephemeral=False is a physical box and behaves exactly as
+    # before. A row with ephemeral=True is a licence slot: checkout
+    # provisions a VM from template_name, checkin destroys it. The
+    # existing status == "checked_out" guard is the slot enforcement —
+    # one row per owned Burp licence means no separate pool logic.
+    ephemeral: Mapped[bool] = mapped_column(Boolean, default=False)
+    template_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    licence_slot: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    provider_instance_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    provision_state: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    provisioned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    provision_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 class JumpBoxSession(Base):
     __tablename__ = "jumpbox_sessions"

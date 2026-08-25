@@ -35,6 +35,15 @@ from auth import (
 import sso
 import ai_service
 from seed import seed_data
+from providers import (
+    get_provider,
+    Instance,
+    InstanceSpec,
+    InstanceState,
+    ConsoleTicket,
+    SSHAccess,
+    ProviderError,
+)
 
 settings = get_settings()
 
@@ -2180,6 +2189,18 @@ async def checkout_jumpbox(box_id: uuid.UUID, body: dict, db: AsyncSession = Dep
     box.checkout_notes = body.get("notes")
     if body.get("engagement_id"):
         box.checked_out_engagement_id = uuid.UUID(body["engagement_id"])
+
+    # Ephemeral boxes get a fresh VM cloned from their golden template.
+    # A provisioning failure rolls the checkout back so the licence slot
+    # isn't left stranded as "checked_out" with nothing behind it.
+    provider = get_provider()
+    if box.ephemeral and provider:
+        try:
+            box = await _provision_for_box(box, provider, current_user)
+        except ProviderError as e:
+            _release_box(box)
+            raise HTTPException(502, f"Provisioning failed: {e}")
+
     # Slack notification
     try:
         from slack_service import send_slack_message
@@ -2200,11 +2221,22 @@ async def checkin_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     box = result.scalar_one_or_none()
     if not box:
         raise HTTPException(404, "Jump box not found")
-    box.status = "available"
-    box.checked_out_by_id = None
-    box.checked_out_at = None
-    box.checkout_notes = None
-    box.checked_out_engagement_id = None
+
+    # Deliberately asymmetric with checkout: a failed destroy must NOT
+    # block checkin. A tester should never be stuck holding a slot
+    # because Proxmox is unreachable — but the orphaned VM gets flagged
+    # rather than silently forgotten.
+    provider = get_provider()
+    if box.ephemeral and provider and box.provider_instance_id:
+        try:
+            await provider.destroy(_instance_from_box(box))
+        except ProviderError as e:
+            box.provision_state = "error"
+            box.provision_error = f"destroy failed, VM may be orphaned: {e}"
+        else:
+            _clear_provisioning(box)
+
+    _release_box(box)
     # Slack notification
     try:
         from slack_service import send_slack_message
@@ -2216,6 +2248,72 @@ async def checkin_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     except Exception:
         pass
     return await _jumpbox_out(box, db)
+
+
+def _release_box(box) -> None:
+    """Return a box to the pool. Does not touch provisioning fields."""
+    box.status = "available"
+    box.checked_out_by_id = None
+    box.checked_out_at = None
+    box.checkout_notes = None
+    box.checked_out_engagement_id = None
+
+
+def _clear_provisioning(box) -> None:
+    box.provider_instance_id = None
+    box.provision_state = None
+    box.provisioned_at = None
+    box.provision_error = None
+    box.ip_address = None
+
+
+def _instance_from_box(box) -> Instance:
+    """Rehydrate a provider Instance from the persisted columns.
+
+    RedTrack is the source of truth; the provider only needs enough to
+    find the VM again.
+    """
+    return Instance(
+        id=str(box.id),
+        provider=box.provider,
+        provider_id=box.provider_instance_id,
+        engagement_id=str(box.checked_out_engagement_id or ""),
+        owner="",
+        licence_slot=box.licence_slot,
+        state=InstanceState.RUNNING,
+        ip_address=box.ip_address,
+    )
+
+
+def _user_ssh_keys(user) -> list[str]:
+    return [k for k in [getattr(user, "ssh_public_key", None)] if k]
+
+
+async def _provision_for_box(box, provider, current_user):
+    """Clone the box's golden template and record the result on the row."""
+    templates = {t.name: t for t in await provider.list_templates()}
+    tpl = templates.get(box.template_name)
+    if not tpl:
+        raise ProviderError(
+            f"template {box.template_name!r} is not configured in vm_templates"
+        )
+
+    inst = await provider.provision(InstanceSpec(
+        engagement_id=str(box.checked_out_engagement_id or box.id),
+        owner=current_user.username,
+        template=tpl,
+        ssh_public_keys=_user_ssh_keys(current_user),
+    ))
+
+    box.provider = inst.provider
+    box.provider_instance_id = inst.provider_id
+    box.provision_state = inst.state.value
+    box.provisioned_at = inst.created_at
+    box.licence_slot = tpl.licence_slot
+    box.provision_error = None
+    # ip_address stays empty here — the VM hasn't booted yet. The client
+    # polls /jumpboxes/{id}/instance until it appears.
+    return box
 
 
 async def _jumpbox_out(box, db):
@@ -2245,7 +2343,121 @@ async def _jumpbox_out(box, db):
         "checked_out_at": str(box.checked_out_at) if box.checked_out_at else None,
         "checkout_notes": box.checkout_notes,
         "auto_release_hours": box.auto_release_hours,
+        "ephemeral": box.ephemeral,
+        "template_name": box.template_name,
+        "licence_slot": box.licence_slot,
+        "provider": box.provider,
+        "provision_state": box.provision_state,
+        "provisioned_at": str(box.provisioned_at) if box.provisioned_at else None,
+        "provision_error": box.provision_error,
     }
+
+@app.get("/jumpboxes/{box_id}/instance")
+async def jumpbox_instance_status(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Poll after checkout until the VM has booted and reported an IP.
+
+    Writes ip_address back onto the box so the existing Resources UI and
+    the session recorder pick it up without any special casing.
+    """
+    box = (await db.execute(select(JumpBox).where(JumpBox.id == box_id))).scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    if not box.ephemeral:
+        return {"ephemeral": False, "state": None, "ip_address": box.ip_address}
+
+    provider = get_provider()
+    if not provider or not box.provider_instance_id:
+        return {"ephemeral": True, "state": box.provision_state, "ip_address": None}
+
+    try:
+        inst = await provider.status(_instance_from_box(box))
+    except ProviderError as e:
+        box.provision_state = "error"
+        box.provision_error = str(e)
+        raise HTTPException(502, f"Could not reach provider: {e}")
+
+    box.provision_state = inst.state.value
+    if inst.ip_address:
+        box.ip_address = inst.ip_address
+
+    return {
+        "ephemeral": True,
+        "state": box.provision_state,
+        "ip_address": box.ip_address,
+        "ready": inst.state == InstanceState.RUNNING and bool(inst.ip_address),
+    }
+
+
+@app.post("/jumpboxes/{box_id}/console")
+async def jumpbox_console(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Mint a short-lived console ticket (~30s).
+
+    RedTrack proxies the websocket — the browser never talks to the
+    hypervisor directly and never sees hypervisor credentials.
+    """
+    box = (await db.execute(select(JumpBox).where(JumpBox.id == box_id))).scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    if not box.ephemeral or not box.provider_instance_id:
+        raise HTTPException(400, "Jump box has no provisioned VM")
+    if box.checked_out_by_id != current_user.id and current_user.role not in (UserRole.admin, UserRole.lead):
+        raise HTTPException(403, "Jump box is checked out by someone else")
+
+    provider = get_provider()
+    if not provider:
+        raise HTTPException(400, "VM provisioning is not enabled")
+
+    try:
+        access = await provider.connect(_instance_from_box(box), mode="console")
+    except ProviderError as e:
+        raise HTTPException(502, f"Console unavailable: {e}")
+
+    return {
+        "url": access.url,
+        "ticket": access.ticket,
+        "expires_at": access.expires_at.isoformat(),
+    }
+
+
+@app.post("/jumpboxes/{box_id}/reset")
+async def jumpbox_reset(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Destroy and reprovision from the golden template, same licence slot.
+
+    A mid-engagement clean slate without giving up the box. The checkout
+    is preserved throughout — this is not a checkin.
+    """
+    box = (await db.execute(select(JumpBox).where(JumpBox.id == box_id))).scalar_one_or_none()
+    if not box:
+        raise HTTPException(404, "Jump box not found")
+    if not box.ephemeral:
+        raise HTTPException(400, "Only ephemeral jump boxes can be reset")
+    if box.checked_out_by_id != current_user.id and current_user.role not in (UserRole.admin, UserRole.lead):
+        raise HTTPException(403, "Jump box is checked out by someone else")
+
+    provider = get_provider()
+    if not provider:
+        raise HTTPException(400, "VM provisioning is not enabled")
+
+    if box.provider_instance_id:
+        try:
+            await provider.destroy(_instance_from_box(box))
+        except ProviderError as e:
+            # Don't reprovision on top of a VM that may still exist —
+            # that would strand the old one and double-use the licence.
+            box.provision_state = "error"
+            box.provision_error = f"destroy failed during reset: {e}"
+            raise HTTPException(502, f"Reset aborted, old VM may still exist: {e}")
+        _clear_provisioning(box)
+
+    try:
+        box = await _provision_for_box(box, provider, current_user)
+    except ProviderError as e:
+        box.provision_state = "error"
+        box.provision_error = str(e)
+        raise HTTPException(502, f"Reprovisioning failed: {e}")
+
+    return await _jumpbox_out(box, db)
+
 
 @app.post("/jumpboxes/{box_id}/sessions", status_code=201)
 async def start_session(box_id: uuid.UUID, body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):

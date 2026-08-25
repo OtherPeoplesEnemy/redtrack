@@ -25,6 +25,31 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 25
     redis_url: str = "redis://redis:6379"
 
+    # ── Jump box VM provisioning ──────────────────────────────────────
+    # Leave vm_provider empty to disable provisioning entirely — jump
+    # boxes then behave exactly as they always have (static inventory).
+    vm_provider: Literal["", "proxmox", "kubevirt"] = ""
+    # Golden templates, comma separated: name:provider_ref:licence_slot
+    # e.g. "kali-burp-1:9001:burp-pro-1,kali-burp-2:9002:burp-pro-2"
+    # Each template is pre-activated with one owned Burp Pro licence, so
+    # the number of templates is the concurrency cap.
+    vm_templates: str = ""
+
+    proxmox_url: str = ""                      # https://pve.example:8006
+    proxmox_token_id: str = ""                 # redtrack@pve!provisioner
+    proxmox_token_secret: str = ""
+    proxmox_node: str = "pve"
+    proxmox_storage: str = "local-lvm"
+    proxmox_bridge: str = "vmbr0"
+    proxmox_verify_tls: bool = True
+    # Linked clones are fast but pin the golden template — you can't
+    # patch or delete a template while clones exist. Full clones cost
+    # disk and about a minute, and are the safer default when the
+    # templates carry licences you'll be updating.
+    proxmox_full_clone: bool = True
+
+    kubevirt_namespace: str = "redtrack-jumpboxes"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",")]
