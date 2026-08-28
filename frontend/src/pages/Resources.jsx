@@ -14,10 +14,17 @@ export default function Resources() {
   const [showModal, setShowModal] = useState(false)
   const [editBox, setEditBox] = useState(null)
   const [viewingSessions, setViewingSessions] = useState(null)
-  const [form, setForm] = useState({ name: '', hostname: '', ip_address: '', os: 'Kali Linux', os_custom: '', location: 'Internal', location_custom: '', purpose: '', notes: '', auto_release_hours: 8 })
+  const [form, setForm] = useState({ name: '', hostname: '', ip_address: '', os: 'Kali Linux', os_custom: '', location: 'Internal', location_custom: '', purpose: '', notes: '', auto_release_hours: 8, ephemeral: false, template_name: '' })
 
   const { data: jumpboxes = [], isLoading } = useQuery('jumpboxes', () => api.get('/jumpboxes/').then(r => r.data))
   const { data: engagements = [] } = useQuery('engagements', () => api.get('/engagements/').then(r => r.data))
+  // Tells us whether VM provisioning is configured, and which golden
+  // templates exist. Fails soft — a box just behaves as static inventory.
+  const { data: vmInfo = { enabled: false, templates: [] } } = useQuery(
+    'vm-templates',
+    () => api.get('/jumpboxes/templates').then(r => r.data),
+    { retry: false, onError: () => {} }
+  )
 
   const createMutation = useMutation(
     (data) => api.post('/jumpboxes/', data),
@@ -44,13 +51,21 @@ export default function Resources() {
     { onSuccess: () => { qc.invalidateQueries('jumpboxes'); toast.success('Jump box checked in') } }
   )
 
+  const resetMutation = useMutation(
+    (id) => api.post(`/jumpboxes/${id}/reset`),
+    {
+      onSuccess: () => { qc.invalidateQueries('jumpboxes'); toast.success('VM reset from golden template') },
+      onError: (e) => toast.error(e.response?.data?.detail || 'Reset failed'),
+    }
+  )
+
   function resetForm() {
-    setForm({ name: '', hostname: '', ip_address: '', os: 'Kali Linux', os_custom: '', location: 'Internal', location_custom: '', purpose: '', notes: '', auto_release_hours: 8 })
+    setForm({ name: '', hostname: '', ip_address: '', os: 'Kali Linux', os_custom: '', location: 'Internal', location_custom: '', purpose: '', notes: '', auto_release_hours: 8, ephemeral: false, template_name: '' })
   }
 
   function startEdit(box) {
     setEditBox(box.id)
-    setForm({ name: box.name, hostname: box.hostname || '', ip_address: box.ip_address || '', os: OS_TYPES.includes(box.os) ? box.os : 'Custom', os_custom: OS_TYPES.includes(box.os) ? '' : box.os, location: LOCATIONS.includes(box.location) ? box.location : 'Custom', location_custom: LOCATIONS.includes(box.location) ? '' : box.location, purpose: box.purpose || '', notes: box.notes || '', auto_release_hours: box.auto_release_hours || 8 })
+    setForm({ name: box.name, hostname: box.hostname || '', ip_address: box.ip_address || '', os: OS_TYPES.includes(box.os) ? box.os : 'Custom', os_custom: OS_TYPES.includes(box.os) ? '' : box.os, location: LOCATIONS.includes(box.location) ? box.location : 'Custom', location_custom: LOCATIONS.includes(box.location) ? '' : box.location, purpose: box.purpose || '', notes: box.notes || '', auto_release_hours: box.auto_release_hours || 8, ephemeral: box.ephemeral || false, template_name: box.template_name || '' })
     setShowModal(true)
   }
 
@@ -90,6 +105,8 @@ export default function Resources() {
               onDelete={() => { if (confirm(`Delete ${box.name}?`)) deleteMutation.mutate(box.id) }}
               onCheckout={(engId, notes) => checkoutMutation.mutate({ id: box.id, engagement_id: engId, notes })}
               onCheckin={() => checkinMutation.mutate(box.id)}
+              onReset={() => resetMutation.mutate(box.id)}
+              resetting={resetMutation.isLoading}
               onViewSessions={() => setViewingSessions(box)}
             />
           ))}
@@ -152,6 +169,39 @@ export default function Resources() {
                 <label style={s.label}>Purpose</label>
                 <input style={s.input} value={form.purpose} onChange={e => setForm({ ...form, purpose: e.target.value })} placeholder="e.g. Internal network pentesting, AD attacks" />
               </div>
+              {/* VM provisioning — only offered when a provider is configured */}
+              {vmInfo.enabled && (
+                <div style={{ marginBottom: 12, background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: form.ephemeral ? 10 : 0 }}>
+                    <input type="checkbox" checked={form.ephemeral}
+                      onChange={e => setForm({ ...form, ephemeral: e.target.checked, template_name: e.target.checked ? form.template_name : '' })}
+                      style={{ width: 14, height: 14, cursor: 'pointer' }} />
+                    <span style={{ fontSize: 12, color: 'var(--text)', fontWeight: 700 }}>Ephemeral VM</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                      provisioned on checkout via {vmInfo.provider}, destroyed on check-in
+                    </span>
+                  </label>
+                  {form.ephemeral && (
+                    <div>
+                      <label style={s.label}>Golden Template *</label>
+                      <select style={s.input} value={form.template_name}
+                        onChange={e => setForm({ ...form, template_name: e.target.value })}>
+                        <option value="">— Select a template —</option>
+                        {vmInfo.templates.map(t => (
+                          <option key={t.name} value={t.name}>
+                            {t.name}{t.licence_slot ? ` (${t.licence_slot})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <div style={{ fontSize: 10, color: 'var(--muted2)', marginTop: 5, lineHeight: 1.5 }}>
+                        One jump box per template — each carries its own licence, so the
+                        checkout guard caps concurrency.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div style={{ marginBottom: 12 }}>
                 <label style={s.label}>Auto-release after (hours)</label>
                 <input style={s.input} type="number" min="1" max="168" value={form.auto_release_hours} onChange={e => setForm({ ...form, auto_release_hours: parseInt(e.target.value) })} />
@@ -163,7 +213,7 @@ export default function Resources() {
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 12, borderTop: '1px solid var(--border)' }}>
                 <button style={s.btn} onClick={() => { setShowModal(false); setEditBox(null); resetForm() }}>Cancel</button>
                 <button style={s.btnPrimary}
-                  disabled={!form.name}
+                  disabled={!form.name || (form.ephemeral && !form.template_name)}
                   onClick={() => {
                     const data = getFormData()
                     editBox ? updateMutation.mutate({ id: editBox, data }) : createMutation.mutate(data)
@@ -179,12 +229,40 @@ export default function Resources() {
   )
 }
 
-function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin, onViewSessions }) {
+function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin, onViewSessions, onReset, resetting }) {
   const [showCheckout, setShowCheckout] = useState(false)
   const [checkoutEngId, setCheckoutEngId] = useState('')
   const [checkoutNotes, setCheckoutNotes] = useState('')
+  const [confirmReset, setConfirmReset] = useState(false)
   const isAvailable = box.status === 'available'
   const statusColor = STATUS_COLOR[box.status] || '#6b7899'
+
+  // Poll only while a provisioned VM is booting — a clone takes a minute or
+  // two, and the IP only appears once qemu-guest-agent reports in.
+  const isProvisioned = box.ephemeral && box.status === 'checked_out'
+  const settled = box.provision_state === 'running' && box.ip_address
+  const { data: instance } = useQuery(
+    ['jumpbox-instance', box.id],
+    () => api.get(`/jumpboxes/${box.id}/instance`).then(r => r.data),
+    {
+      enabled: isProvisioned && !settled,
+      refetchInterval: 5000,
+      retry: false,
+      onError: () => {},
+    }
+  )
+  const state = instance?.state || box.provision_state
+  const ip = instance?.ip_address || box.ip_address
+
+  async function openConsole() {
+    try {
+      const { data } = await api.post(`/jumpboxes/${box.id}/console`)
+      // Ticket is good for ~30s, so open immediately rather than storing it.
+      window.open(data.url, '_blank', 'noopener,width=1280,height=800')
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Console unavailable')
+    }
+  }
 
   return (
     <div style={{ background: 'var(--surface)', border: `1px solid ${statusColor}33`, borderRadius: 10, overflow: 'hidden' }}>
@@ -205,7 +283,40 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
           <span style={cs.tag}>{box.os}</span>
           <span style={cs.tag}>{box.location}</span>
           {box.purpose && <span style={{ ...cs.tag, color: 'var(--text)' }}>{box.purpose}</span>}
+          {box.ephemeral && (
+            <span style={{ ...cs.tag, color: '#a78bfa', borderColor: '#a78bfa55' }}>
+              ⟳ {box.template_name || 'ephemeral'}
+            </span>
+          )}
+          {box.licence_slot && (
+            <span style={{ ...cs.tag, color: '#60a5fa', borderColor: '#60a5fa55' }}>{box.licence_slot}</span>
+          )}
         </div>
+
+        {isProvisioned && (
+          <div style={{
+            background: 'var(--surface2)',
+            border: `1px solid ${state === 'error' ? 'var(--red-mid)' : 'var(--border)'}`,
+            borderRadius: 6, padding: '8px 12px', marginBottom: 10,
+          }}>
+            <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>
+              Virtual Machine
+            </div>
+            {state === 'error' ? (
+              <div style={{ fontSize: 11, color: 'var(--red)' }}>
+                ⚠ {box.provision_error || 'Provisioning error'}
+              </div>
+            ) : state === 'running' && ip ? (
+              <div style={{ fontSize: 11, color: '#4ade80', fontFamily: 'monospace' }}>
+                ● Ready — {ip}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: 'var(--amber)' }}>
+                ◌ Provisioning… waiting for the VM to boot and report an IP
+              </div>
+            )}
+          </div>
+        )}
 
         {box.status === 'checked_out' && (
           <div style={{ background: 'var(--amber-dim)', border: '1px solid var(--amber)', borderRadius: 6, padding: '8px 12px', marginBottom: 10 }}>
@@ -248,6 +359,28 @@ function JumpBoxCard({ box, engagements, onEdit, onDelete, onCheckout, onCheckin
           ) : box.status === 'checked_out' ? (
             <button style={cs.btnOrange} onClick={onCheckin}>↑ Check In</button>
           ) : null}
+          {isProvisioned && state === 'running' && (
+            <button style={{ ...cs.btn, color: '#a78bfa', borderColor: '#a78bfa55' }} onClick={openConsole}>
+              🖥 Console
+            </button>
+          )}
+          {isProvisioned && (
+            confirmReset ? (
+              <>
+                <button style={{ ...cs.btn, color: 'var(--red)', borderColor: 'var(--red-mid)' }}
+                  disabled={resetting}
+                  onClick={() => { onReset(); setConfirmReset(false) }}>
+                  {resetting ? 'Resetting…' : 'Destroy & rebuild?'}
+                </button>
+                <button style={cs.btn} onClick={() => setConfirmReset(false)}>Cancel</button>
+              </>
+            ) : (
+              <button style={{ ...cs.btn, color: 'var(--amber)', borderColor: 'var(--amber)' }}
+                onClick={() => setConfirmReset(true)}>
+                ⟳ Reset
+              </button>
+            )
+          )}
           <button style={{ ...cs.btn, color: '#60a5fa', borderColor: '#60a5fa55' }} onClick={onViewSessions}>📋 Sessions</button>
           <button style={cs.btn} onClick={onEdit}>Edit</button>
           <button style={{ ...cs.btn, color: 'var(--red)', borderColor: 'var(--red-mid)', marginLeft: 'auto' }} onClick={onDelete}>Del</button>

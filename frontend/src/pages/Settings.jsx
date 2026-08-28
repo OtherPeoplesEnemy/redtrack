@@ -5,6 +5,7 @@ import { useAuth } from '../hooks/useAuth'
 import api, { authApi, tokensApi } from '../api/client'
 import Integrations from './Integrations'
 import SSOSettings from './SSOSettings'
+import JumpBoxSettings from './JumpBoxSettings'
 import toast from 'react-hot-toast'
 
 const ROLE_COLOR = { admin: '#e05252', lead: '#f0883e', tester: '#60a5fa', client: '#6b7899' }
@@ -13,6 +14,9 @@ export default function Settings() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const isAdmin = user?.role === 'admin'
+  // Provisioning config writes to the hypervisor, so it follows the same
+  // lead-or-admin gate the backend endpoints use.
+  const canManageJumpBoxes = isAdmin || user?.role === 'lead'
 
   // ?tab=... lets the old /integrations and /sso routes redirect straight to
   // the right panel, so existing links and bookmarks keep working.
@@ -100,6 +104,7 @@ export default function Settings() {
     { id: 'profile', label: 'My Profile' },
     { id: 'tokens', label: 'API Tokens' },
     { id: 'integrations', label: 'Integrations' },
+    ...(canManageJumpBoxes ? [{ id: 'jumpboxes', label: 'Jump Boxes' }] : []),
     ...(isAdmin ? [
       { id: 'sso', label: 'SSO / Auth' },
       { id: 'users', label: 'User Management' },
@@ -270,6 +275,8 @@ export default function Settings() {
           )}
 
           {/* ── SSO / Auth (admin only) ── */}
+          {activeTab === 'jumpboxes' && canManageJumpBoxes && <JumpBoxSettings />}
+
           {activeTab === 'sso' && isAdmin && (
             <div>
               <div style={s.sectionTitle}>SSO / Auth</div>

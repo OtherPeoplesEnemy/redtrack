@@ -37,6 +37,11 @@ import ai_service
 from seed import seed_data
 from providers import (
     get_provider,
+    build_provider,
+    load_config as load_provider_config,
+    parse_templates,
+    INTEGRATION_NAME as VM_INTEGRATION_NAME,
+    SECRET_FIELDS as VM_SECRET_FIELDS,
     Instance,
     InstanceSpec,
     InstanceState,
@@ -1840,6 +1845,124 @@ async def save_integration(name: str, body: dict, db: AsyncSession = Depends(get
     return {"name": integ.name, "enabled": integ.enabled, "config": integ.config}
 
 
+# ─── Jump box VM provisioning config ──────────────────────────────────────────
+
+@app.get("/integrations/vm-provisioning")
+async def get_vm_provisioning(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    """Current provisioning config, with secrets redacted.
+
+    `configured_in_env` flags fields coming from .env rather than the database,
+    so the UI can explain why a value it never saved is populated.
+    """
+    from providers import _env_config
+
+    config = await load_provider_config(db)
+    env = _env_config()
+
+    row = (await db.execute(
+        select(Integration).where(Integration.name == VM_INTEGRATION_NAME)
+    )).scalar_one_or_none()
+
+    safe = {k: v for k, v in config.items() if k not in VM_SECRET_FIELDS}
+    # Report whether a secret exists, never its value.
+    safe["proxmox_token_secret_set"] = bool(config.get("proxmox_token_secret"))
+
+    # Normalise templates to the list form the UI edits.
+    try:
+        safe["templates"] = [
+            {"name": t.name, "provider_ref": t.provider_ref,
+             "licence_slot": t.licence_slot or "",
+             "cores": t.default_cores, "memory_mb": t.default_memory_mb}
+            for t in parse_templates(config.get("templates"))
+        ]
+    except ProviderError:
+        safe["templates"] = []
+
+    return {
+        "enabled": bool(row.enabled) if row else bool(env.get("provider")),
+        "stored_in_db": row is not None,
+        "configured_in_env": {k: bool(v) for k, v in env.items() if v not in ("", None)},
+        "config": safe,
+    }
+
+
+@app.put("/integrations/vm-provisioning")
+async def save_vm_provisioning(body: dict, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    """Save provisioning config. Takes effect immediately — no restart."""
+    incoming = body.get("config") or {}
+
+    row = (await db.execute(
+        select(Integration).where(Integration.name == VM_INTEGRATION_NAME)
+    )).scalar_one_or_none()
+
+    existing = dict((row.config or {}) if row else {})
+
+    # A blank secret means "leave it alone", so the form can be saved without
+    # retyping the token every time.
+    for k, v in incoming.items():
+        if k in VM_SECRET_FIELDS and not v:
+            continue
+        existing[k] = v
+
+    if row:
+        row.enabled = body.get("enabled", row.enabled)
+        row.config = existing
+    else:
+        row = Integration(name=VM_INTEGRATION_NAME, enabled=body.get("enabled", False), config=existing)
+        db.add(row)
+    await db.flush()
+
+    return await get_vm_provisioning(db=db, current_user=current_user)
+
+
+@app.post("/integrations/vm-provisioning/test")
+async def test_vm_provisioning(body: dict = None, db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
+    """Connect to the hypervisor and list templates.
+
+    Tests the *saved* config. Save first, then test — that way what you verify
+    is what checkout will actually use.
+    """
+    try:
+        provider = await get_provider(db)
+    except ProviderError as e:
+        raise HTTPException(400, f"Configuration error: {e}")
+
+    if not provider:
+        raise HTTPException(400, "No provider selected")
+
+    try:
+        templates = await provider.list_templates()
+    except ProviderError as e:
+        raise HTTPException(502, f"Could not reach {provider.name}: {e}")
+
+    # list_templates only reflects config; hit the API to prove credentials work.
+    missing = []
+    for t in templates:
+        try:
+            await provider.status(Instance(
+                id="", provider=provider.name, provider_id=t.provider_ref,
+                engagement_id="", owner="", licence_slot=t.licence_slot,
+                state=InstanceState.STOPPED,
+            ))
+        except ProviderError:
+            missing.append(f"{t.name} (ID {t.provider_ref})")
+
+    if missing:
+        return {
+            "ok": False,
+            "provider": provider.name,
+            "message": "Connected, but these templates weren't found: " + ", ".join(missing),
+            "templates": len(templates),
+        }
+
+    return {
+        "ok": True,
+        "provider": provider.name,
+        "message": f"Connected to {provider.name}. {len(templates)} template(s) verified.",
+        "templates": len(templates),
+    }
+
+
 @app.post("/integrations/slack/test")
 async def test_slack(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_lead_or_admin)):
     from slack_service import send_slack_message
@@ -2149,6 +2272,9 @@ async def create_jumpbox(body: dict, db: AsyncSession = Depends(get_db), current
         purpose=body.get("purpose"),
         notes=body.get("notes"),
         auto_release_hours=body.get("auto_release_hours", 8),
+        ephemeral=body.get("ephemeral", False),
+        template_name=body.get("template_name"),
+        licence_slot=body.get("licence_slot"),
     )
     db.add(box)
     await db.flush()
@@ -2161,8 +2287,14 @@ async def update_jumpbox(box_id: uuid.UUID, body: dict, db: AsyncSession = Depen
     box = result.scalar_one_or_none()
     if not box:
         raise HTTPException(404, "Jump box not found")
+    # Provisioning state is owned by the provider layer — letting a client
+    # overwrite provider_instance_id would orphan a running VM.
+    protected = {
+        "id", "created_at", "provider", "provider_instance_id",
+        "provision_state", "provisioned_at", "provision_error",
+    }
     for k, v in body.items():
-        if hasattr(box, k) and k not in ['id', 'created_at']:
+        if hasattr(box, k) and k not in protected:
             setattr(box, k, v)
     return await _jumpbox_out(box, db)
 
@@ -2173,6 +2305,31 @@ async def delete_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), 
     box = result.scalar_one_or_none()
     if box:
         await db.delete(box)
+
+
+@app.get("/jumpboxes/templates")
+async def list_vm_templates(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_tester_or_above)):
+    """Golden templates configured in VM_TEMPLATES.
+
+    Lets the UI offer a dropdown when creating an ephemeral box, rather than
+    a free-text field that silently fails at checkout if it doesn't match.
+    """
+    provider = await get_provider(db)
+    if not provider:
+        return {"enabled": False, "provider": None, "templates": []}
+    try:
+        templates = await provider.list_templates()
+    except ProviderError as e:
+        raise HTTPException(502, f"Could not list templates: {e}")
+    return {
+        "enabled": True,
+        "provider": provider.name,
+        "templates": [
+            {"name": t.name, "licence_slot": t.licence_slot,
+             "cores": t.default_cores, "memory_mb": t.default_memory_mb}
+            for t in templates
+        ],
+    }
 
 
 @app.post("/jumpboxes/{box_id}/checkout")
@@ -2193,7 +2350,7 @@ async def checkout_jumpbox(box_id: uuid.UUID, body: dict, db: AsyncSession = Dep
     # Ephemeral boxes get a fresh VM cloned from their golden template.
     # A provisioning failure rolls the checkout back so the licence slot
     # isn't left stranded as "checked_out" with nothing behind it.
-    provider = get_provider()
+    provider = await get_provider(db)
     if box.ephemeral and provider:
         try:
             box = await _provision_for_box(box, provider, current_user)
@@ -2226,7 +2383,7 @@ async def checkin_jumpbox(box_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     # block checkin. A tester should never be stuck holding a slot
     # because Proxmox is unreachable — but the orphaned VM gets flagged
     # rather than silently forgotten.
-    provider = get_provider()
+    provider = await get_provider(db)
     if box.ephemeral and provider and box.provider_instance_id:
         try:
             await provider.destroy(_instance_from_box(box))
@@ -2365,7 +2522,7 @@ async def jumpbox_instance_status(box_id: uuid.UUID, db: AsyncSession = Depends(
     if not box.ephemeral:
         return {"ephemeral": False, "state": None, "ip_address": box.ip_address}
 
-    provider = get_provider()
+    provider = await get_provider(db)
     if not provider or not box.provider_instance_id:
         return {"ephemeral": True, "state": box.provision_state, "ip_address": None}
 
@@ -2403,7 +2560,7 @@ async def jumpbox_console(box_id: uuid.UUID, db: AsyncSession = Depends(get_db),
     if box.checked_out_by_id != current_user.id and current_user.role not in (UserRole.admin, UserRole.lead):
         raise HTTPException(403, "Jump box is checked out by someone else")
 
-    provider = get_provider()
+    provider = await get_provider(db)
     if not provider:
         raise HTTPException(400, "VM provisioning is not enabled")
 
@@ -2434,7 +2591,7 @@ async def jumpbox_reset(box_id: uuid.UUID, db: AsyncSession = Depends(get_db), c
     if box.checked_out_by_id != current_user.id and current_user.role not in (UserRole.admin, UserRole.lead):
         raise HTTPException(403, "Jump box is checked out by someone else")
 
-    provider = get_provider()
+    provider = await get_provider(db)
     if not provider:
         raise HTTPException(400, "VM provisioning is not enabled")
 
