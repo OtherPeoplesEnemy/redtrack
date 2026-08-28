@@ -50,7 +50,7 @@ Open-source collaborative penetration testing management platform with AI assist
 - Quick-add findings from terminal
 - API key authentication
 
-### Notebook & RedNote Sync
+### RedNote Sync
 - **Per-engagement notebook** — CherryTree-style tree of folders and rich-text nodes
 - **RedNote integration** — push a local [RedNote](https://github.com/OtherPeoplesEnemy/rednote) project into an engagement over the API
 - Each tester's push lands under its own subtree, so several people can sync the same engagement without collision
