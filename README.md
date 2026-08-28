@@ -50,6 +50,32 @@ Open-source collaborative penetration testing management platform with AI assist
 - Quick-add findings from terminal
 - API key authentication
 
+### Notebook & RedNote Sync
+- **Per-engagement notebook** — CherryTree-style tree of folders and rich-text nodes
+- **RedNote integration** — push a local [RedNote](https://github.com/OtherPeoplesEnemy/rednote) project into an engagement over the API
+- Each tester's push lands under its own subtree, so several people can sync the same engagement without collision
+- Synced nodes are **read-only in RedTrack** — RedNote stays the source of truth; edit there and push again
+- Deleting a node in RedNote removes it on the next push
+- Authenticates with a per-user API token, so ownership follows whoever pushed
+
+### Jump Boxes
+- Shared jump box inventory with checkout / check-in and engagement attribution
+- Session recording — commands logged per session with duration and status
+- Slack notification on checkout and check-in
+- Auto-release window per box (`auto_release_hours`)
+- **VM provisioning** (optional) — checkout clones a golden template, check-in destroys it
+  - Backends: Proxmox VE, and OpenShift/KubeVirt (planned)
+  - One jump box row per licensed template, so the existing checkout guard caps concurrency
+  - Short-lived browser console tickets proxied through RedTrack; SSH keys injected at boot via cloud-init
+  - Disabled by default — see [Jump Box VM Provisioning](#jump-box-vm-provisioning)
+
+### Authentication & Integrations
+- Local accounts with role-based access (admin / lead / tester / client)
+- **SSO** — SAML 2.0 and OIDC, with IdP-provisioned accounts
+- **API tokens** — per-user, scoped, for redtrack-cli and RedNote
+- **Slack** — engagement and finding notifications, jump box activity
+- **ServiceNow** — finding export
+
 ---
 
 ## Quick Start
@@ -142,6 +168,111 @@ In any engagement → Recon tab → Import Scan:
 
 ---
 
+## RedNote Sync
+
+[RedNote](https://github.com/OtherPeoplesEnemy/rednote) is the offline notes app
+(Tauri + SQLite) that pairs with RedTrack. It works with no network; pushing to
+RedTrack is an explicit action.
+
+**Setup:**
+
+1. In RedTrack: Settings → API Tokens → create a token
+2. In RedNote: Settings → RedTrack, paste the token and your server URL
+3. Map the RedNote project to a RedTrack engagement, then push
+
+**Endpoint:**
+
+```
+POST /engagements/{engagement_id}/notes/sync
+Authorization: Bearer <api-token>
+
+{
+  "project_id":   "<stable RedNote project uuid>",
+  "project_name": "Acme Internal",
+  "nodes": [
+    {
+      "id":        "<RedNote node id>",
+      "parent_id": "<RedNote parent id or null>",
+      "title":     "Domain Admin path",
+      "node_type": "note",
+      "content":   "<html>",
+      "icon":      "🔑",
+      "sort_order": 0
+    }
+  ]
+}
+```
+
+The push is a **full-state bulk upsert**, not a delta: send every node in the
+project each time. Anything previously synced but absent from the payload is
+treated as deleted in RedNote and removed. `project_id` must be stable across
+pushes — it's what pins the subtree.
+
+Notes created directly in RedTrack (`source="redtrack"`) are unaffected by sync
+and remain editable by anyone on the engagement.
+
+---
+
+## Jump Box VM Provisioning
+
+Optional. With `VM_PROVIDER` unset, jump boxes behave as static inventory rows
+and nothing below applies.
+
+When enabled, checking out an *ephemeral* jump box clones a golden template into
+a fresh VM; checking in destroys it. Each template is pre-activated with one
+licensed toolset (e.g. a Burp Pro seat), so the number of templates is the
+concurrency cap — the existing `status == "checked_out"` guard enforces it, with
+no separate licence pool.
+
+**Configure in `.env`:**
+
+```env
+VM_PROVIDER=proxmox
+# name:template_vmid:licence_slot, comma separated
+VM_TEMPLATES=kali-burp-1:9001:burp-pro-1,kali-burp-2:9002:burp-pro-2
+
+PROXMOX_URL=https://pve.example:8006
+PROXMOX_TOKEN_ID=redtrack@pve!provisioner
+PROXMOX_TOKEN_SECRET=
+PROXMOX_NODE=pve
+PROXMOX_STORAGE=local-lvm
+PROXMOX_BRIDGE=vmbr0
+PROXMOX_VERIFY_TLS=true
+PROXMOX_FULL_CLONE=true
+```
+
+Then create one jump box per template with `ephemeral=true` and `template_name`
+set to the matching entry.
+
+**Golden template requirements:**
+
+- `qemu-guest-agent` installed and enabled — without it the VM never reports an
+  IP and never shows as ready
+- `cloud-init` enabled, with **no** baked-in SSH keys or credentials
+- Licensed tooling pre-activated, so a reset returns to a fully configured box
+
+**Proxmox API token** needs `VM.Allocate`, `VM.Clone`, `VM.Config.*`,
+`VM.PowerMgmt`, `VM.Console`, and `Datastore.AllocateSpace`.
+
+**Endpoints:**
+
+```
+GET  /jumpboxes/{id}/instance   # poll after checkout until ready
+POST /jumpboxes/{id}/console    # short-lived console ticket (~30s)
+POST /jumpboxes/{id}/reset      # destroy + reprovision, same licence slot
+```
+
+Failure handling is deliberately asymmetric: a failed **provision** rolls the
+checkout back so the slot isn't stranded, while a failed **destroy** does not
+block check-in — the box is flagged `provision_state="error"` with the details
+in `provision_error` so an orphaned VM is visible rather than forgotten.
+
+**Adding a backend:** implement `JumpBoxProvider` in `backend/providers/base.py`
+and register it in the factory in `backend/providers/__init__.py`. Nothing in
+the checkout path is backend-specific.
+
+---
+
 ## Let's Encrypt (when ready)
 
 ```bash
@@ -165,6 +296,11 @@ Browser (HTTPS:443)
        └── /ws/     → WebSocket (real-time)
               │
          PostgreSQL + Redis
+              │
+       Provider interface
+              │
+       ├── Proxmox VE API
+       └── KubeVirt (planned)
 ```
 
 ---
@@ -186,16 +322,25 @@ Change immediately after first login in Settings → My Profile.
 - **Backend:** FastAPI, SQLAlchemy async, PostgreSQL, Redis
 - **AI:** Google Gemini / Anthropic Claude (switchable)
 - **Reports:** python-docx + LibreOffice PDF
+- **Notes:** RedNote (Tauri + SQLite) sync over API token
+- **Provisioning:** Proxmox VE (KubeVirt planned) via pluggable provider interface
 - **Infrastructure:** Docker Compose, Nginx, self-signed SSL
 
 ---
 
 ## Roadmap
 
+- [x] Burp Suite real-time extension (Jython)
+- [x] Slack notifications
+- [x] RedNote sync
+- [x] Jump box VM provisioning — Proxmox
+- [ ] Jump box VM provisioning — OpenShift / KubeVirt
+- [ ] Frontend for provisioned boxes (console viewer, reset, poll-until-ready)
+- [ ] Enforce `auto_release_hours` (matters once a stale checkout holds a live VM)
 - [ ] Chrome extension (floating note-taking panel)
 - [ ] CrackMapExec / Nuclei CLI parsers
 - [ ] Full MITRE ATLAS matrix for AI red team
-- [ ] Burp Suite real-time extension
 - [ ] Client portal (read-only scoped access)
-- [ ] Email/Slack notifications
+- [ ] Email notifications
 - [ ] Full interactive MITRE ATT&CK matrix (without Navigator dependency)
+- [ ] Risk auto-calculation for findings
