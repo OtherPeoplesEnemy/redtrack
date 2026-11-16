@@ -17,6 +17,7 @@ import uuid
 import aiofiles
 import hashlib
 import hmac
+import logging
 
 from config import get_settings
 from database import get_db
@@ -25,12 +26,14 @@ from models import (
     JumpBox, JumpBoxSession,
     User, Engagement, Finding, Evidence, Comment, Report,
     VulnTemplate, EngagementMember, ReconHost, MitreTechnique, EngagementTask, Integration, TaskTemplate,
-    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig, ApiToken, Note
+    Severity, FindingStatus, EngagementStatus, UserRole, SSOConfig, ApiToken, Note, AuthPolicy
 )
 from auth import (
     hash_password, verify_password, create_access_token, create_refresh_token,
     decode_token, get_current_user, require_tester_or_above, require_lead_or_admin, require_admin,
-    generate_api_token
+    generate_api_token,
+    AUTH_METHOD_PASSWORD, AUTH_METHOD_SSO, LOCAL_LOGIN_DISABLED,
+    sso_enforced, local_login_blocked,
 )
 import sso
 import ai_service
@@ -51,6 +54,7 @@ from providers import (
 )
 
 settings = get_settings()
+auth_logger = logging.getLogger("redtrack.auth")
 
 
 @asynccontextmanager
@@ -91,11 +95,22 @@ async def create_user(body: dict, db: AsyncSession = Depends(get_db), current_us
     existing = await db.execute(select(User).where(User.email == body["email"]))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "Email already registered")
+    # Under SSO enforcement, admins can still pre-create accounts (to set the
+    # role ahead of first login), but without a password. The account is
+    # adopted by email the first time that person signs in through SSO.
+    if await sso_enforced(db):
+        if body.get("password"):
+            raise HTTPException(400, "SSO is enforced; new accounts can't have a local password")
+        hashed = None
+    else:
+        if not body.get("password"):
+            raise HTTPException(400, "Password is required")
+        hashed = hash_password(body["password"])
     user = User(
         email=body["email"],
         username=body["username"],
         full_name=body["full_name"],
-        hashed_password=hash_password(body["password"]),
+        hashed_password=hashed,
         role=body.get("role", "tester"),
     )
     db.add(user)
@@ -138,6 +153,8 @@ async def health():
 
 @app.post("/auth/register", status_code=201)
 async def register(body: dict, db: AsyncSession = Depends(get_db)):
+    if await sso_enforced(db):
+        raise HTTPException(403, "Self-registration is disabled while SSO is enforced")
     existing = await db.execute(select(User).where(User.email == body["email"]))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "Email already registered")
@@ -152,11 +169,26 @@ async def register(body: dict, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/auth/login")
-async def login(body: dict, db: AsyncSession = Depends(get_db)):
+async def login(body: dict, request: Request, db: AsyncSession = Depends(get_db)):
+    # Checked before the password so a disabled login path isn't a password
+    # oracle: every attempt gets the same 403 whether the credentials are good.
+    enforced = await sso_enforced(db)
+    if enforced and not settings.allow_local_login:
+        raise HTTPException(403, LOCAL_LOGIN_DISABLED)
+
     result = await db.execute(select(User).where(User.email == body["email"]))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(body["password"], user.hashed_password):
+    if not user or not user.is_active or not verify_password(body["password"], user.hashed_password):
         raise HTTPException(401, "Invalid credentials")
+
+    if enforced:
+        # Break-glass path (ALLOW_LOCAL_LOGIN=true). Leave a trail every time.
+        client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+        auth_logger.warning(
+            "BREAK-GLASS local login while SSO is enforced: user=%s id=%s ip=%s",
+            user.email, user.id, client_ip,
+        )
+
     user.last_login = datetime.now(timezone.utc)
     return {
         "access_token": create_access_token(str(user.id)),
@@ -169,6 +201,13 @@ async def login(body: dict, db: AsyncSession = Depends(get_db)):
 @app.post("/auth/refresh")
 async def refresh(body: dict, db: AsyncSession = Depends(get_db)):
     payload = decode_token(body["refresh_token"])
+    if payload.get("type") != "refresh":
+        raise HTTPException(401, "Invalid token type")
+    # Carry the original sign-in method forward, so a password session can't
+    # launder itself into an SSO one by refreshing.
+    auth_method = payload.get("auth_method", AUTH_METHOD_PASSWORD)
+    if auth_method != AUTH_METHOD_SSO and await local_login_blocked(db):
+        raise HTTPException(401, LOCAL_LOGIN_DISABLED)
     result = await db.execute(select(User).where(User.id == payload["sub"]))
     user = result.scalar_one_or_none()
     # is_active must be checked here too — otherwise deactivating an account
@@ -176,8 +215,8 @@ async def refresh(body: dict, db: AsyncSession = Depends(get_db)):
     if not user or not user.is_active:
         raise HTTPException(401, "User not found or inactive")
     return {
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": create_access_token(str(user.id), auth_method),
+        "refresh_token": create_refresh_token(str(user.id), auth_method),
         "token_type": "bearer",
         "user": _user_out(user),
     }
@@ -507,6 +546,7 @@ async def put_saml_config(body: dict, db: AsyncSession = Depends(get_db), curren
                 setattr(cfg, k, body[k])
 
     if "enabled" in body:
+        await _guard_last_provider_disable(db, cfg, bool(body["enabled"]))
         cfg.enabled = bool(body["enabled"])
     if "auto_provision" in body:
         cfg.auto_provision = bool(body["auto_provision"])
@@ -531,6 +571,7 @@ async def put_oidc_config(body: dict, db: AsyncSession = Depends(get_db), curren
     if body.get("oidc_client_secret"):
         cfg.oidc_client_secret = body["oidc_client_secret"]
     if "enabled" in body:
+        await _guard_last_provider_disable(db, cfg, bool(body["enabled"]))
         cfg.enabled = bool(body["enabled"])
     if "auto_provision" in body:
         cfg.auto_provision = bool(body["auto_provision"])
@@ -556,7 +597,84 @@ async def sso_status(db: AsyncSession = Depends(get_db)):
     return {
         "saml_enabled": bool(saml_cfg and saml_cfg.enabled),
         "oidc_enabled": bool(oidc_cfg and oidc_cfg.enabled),
+        # Drives whether Login shows the email/password form at all.
+        "local_login_enabled": not await local_login_blocked(db),
     }
+
+
+# ─── SSO — enforcement policy ───────────────────────────────────────────────────
+
+async def _guard_last_provider_disable(db: AsyncSession, cfg: SSOConfig, new_enabled: bool) -> None:
+    """Refuse to switch off the last enabled provider while SSO is enforced."""
+    if new_enabled or not cfg.enabled:
+        return
+    policy = await db.get(AuthPolicy, 1)
+    if not policy or not policy.enforce_sso:
+        return
+    others = await db.execute(
+        select(SSOConfig.id).where(SSOConfig.enabled.is_(True), SSOConfig.provider != cfg.provider).limit(1)
+    )
+    if others.first() is None:
+        raise HTTPException(
+            400,
+            "This is the only enabled SSO provider and SSO is enforced. "
+            "Turn off SSO enforcement first, or enable another provider.",
+        )
+
+
+def _auth_policy_out(policy: Optional[AuthPolicy], effective: bool) -> dict:
+    return {
+        "enforce_sso": bool(policy and policy.enforce_sso),
+        # enforce_sso is the admin's setting; "effective" is whether local
+        # login is actually refused right now (needs an enabled provider and
+        # no ALLOW_LOCAL_LOGIN override).
+        "effective": effective,
+        "break_glass_active": settings.allow_local_login,
+        "updated_at": str(policy.updated_at) if policy and policy.updated_at else None,
+    }
+
+
+@app.get("/admin/auth-policy")
+async def get_auth_policy(db: AsyncSession = Depends(get_db), current_user: User = Depends(require_admin)):
+    policy = await db.get(AuthPolicy, 1)
+    return _auth_policy_out(policy, await local_login_blocked(db))
+
+
+@app.put("/admin/auth-policy")
+async def put_auth_policy(
+    body: dict,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    enforce = bool(body.get("enforce_sso"))
+    if enforce:
+        any_enabled = await db.execute(select(SSOConfig.id).where(SSOConfig.enabled.is_(True)).limit(1))
+        if any_enabled.first() is None:
+            raise HTTPException(400, "Enable and test an SSO provider before enforcing SSO")
+        # Lockout guard: the admin flipping the switch must be signed in
+        # through SSO right now, which proves the IdP round-trip works and
+        # that this admin will still be able to get back in afterwards.
+        if getattr(request.state, "auth_method", None) != AUTH_METHOD_SSO:
+            raise HTTPException(
+                400,
+                "Sign in with SSO before enforcing it. That confirms SSO works "
+                "for your account and you won't be locked out.",
+            )
+
+    policy = await db.get(AuthPolicy, 1)
+    if not policy:
+        policy = AuthPolicy(id=1)
+        db.add(policy)
+    policy.enforce_sso = enforce
+    policy.updated_by = current_user.id
+    await db.flush()
+    await db.refresh(policy)
+    auth_logger.warning(
+        "SSO enforcement %s by %s (id=%s)", "ENABLED" if enforce else "DISABLED",
+        current_user.email, current_user.id,
+    )
+    return _auth_policy_out(policy, await local_login_blocked(db))
 
 
 async def _provision_sso_user(db: AsyncSession, cfg: SSOConfig, provider: str, subject: str, email: str, full_name: str) -> User:
@@ -607,8 +725,8 @@ async def sso_exchange(body: dict, db: AsyncSession = Depends(get_db)):
     if not user or not user.is_active:
         raise HTTPException(401, "User not found or inactive")
     return {
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": create_access_token(str(user.id), AUTH_METHOD_SSO),
+        "refresh_token": create_refresh_token(str(user.id), AUTH_METHOD_SSO),
         "token_type": "bearer",
         "user": _user_out(user),
     }

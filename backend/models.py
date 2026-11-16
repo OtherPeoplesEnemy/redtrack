@@ -189,6 +189,23 @@ class SSOConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AuthPolicy(Base):
+    """
+    Single-row, deployment-wide auth policy (id is always 1).
+
+    enforce_sso: when True and at least one SSO provider is enabled, password
+    sign-in, self-registration and password-bearing sessions are refused.
+    Kept separate from SSOConfig.enabled on purpose: admins turn SSO on, prove
+    it works, and only then cut local access off.
+    """
+    __tablename__ = "auth_policy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enforce_sso: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Engagement(Base):
     __tablename__ = "engagements"
 

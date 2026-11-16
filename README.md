@@ -72,6 +72,7 @@ Open-source collaborative penetration testing management platform with AI assist
 ### Authentication & Integrations
 - Local accounts with role-based access (admin / lead / tester / client)
 - **SSO** — SAML 2.0 and OIDC, with IdP-provisioned accounts
+- **Require SSO** — admins can turn off password sign-in once SSO works (Settings → SSO). Existing password sessions are signed out and API tokens of local-only accounts stop working. If the IdP breaks, set `ALLOW_LOCAL_LOGIN=true` in `.env` and restart the backend to get back in; every such login is logged at WARNING.
 - **API tokens** — per-user, scoped, for redtrack-cli and RedNote
 - **Slack** — engagement and finding notifications, jump box activity
 - **ServiceNow** — finding export
