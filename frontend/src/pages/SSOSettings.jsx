@@ -48,14 +48,34 @@ export default function SSOSettings({ embedded = false }) {
 
   const samlEnabled = data?.saml?.enabled || false
   const oidcEnabled = data?.oidc?.enabled || false
+  const anyEnabled = samlEnabled || oidcEnabled
+
+  const { data: policy } = useQuery('auth-policy', () => ssoApi.getPolicy().then(r => r.data))
+  const savePolicy = useMutation((enforce) => ssoApi.savePolicy({ enforce_sso: enforce }), {
+    onSuccess: (r) => {
+      qc.invalidateQueries('auth-policy'); qc.invalidateQueries('sso-status')
+      toast.success(r.data.enforce_sso ? 'SSO enforced: local sign-in is now disabled' : 'SSO enforcement turned off')
+    },
+    onError: (e) => toast.error(e.response?.data?.detail || 'Failed to update SSO enforcement'),
+  })
+
+  function toggleEnforce() {
+    const next = !policy?.enforce_sso
+    if (next && !window.confirm(
+      'Enforce SSO?\n\nPassword sign-in will stop working for everyone, existing password sessions ' +
+      'will be signed out, and API tokens belonging to accounts that have never signed in via SSO ' +
+      'will stop working.\n\nIf the IdP ever breaks, set ALLOW_LOCAL_LOGIN=true on the server and restart to get back in.'
+    )) return
+    savePolicy.mutate(next)
+  }
 
   const saveSaml = useMutation((body) => ssoApi.saveSaml(body), {
-    onSuccess: () => { qc.invalidateQueries('sso-admin-config'); toast.success('SAML settings saved') },
+    onSuccess: () => { qc.invalidateQueries('sso-admin-config'); qc.invalidateQueries('auth-policy'); qc.invalidateQueries('sso-status'); toast.success('SAML settings saved') },
     onError: (e) => toast.error(e.response?.data?.detail || 'Failed to save SAML settings'),
   })
 
   const saveOidc = useMutation((body) => ssoApi.saveOidc(body), {
-    onSuccess: () => { qc.invalidateQueries('sso-admin-config'); toast.success('OIDC settings saved') },
+    onSuccess: () => { qc.invalidateQueries('sso-admin-config'); qc.invalidateQueries('auth-policy'); qc.invalidateQueries('sso-status'); toast.success('OIDC settings saved') },
     onError: (e) => toast.error(e.response?.data?.detail || 'Failed to save OIDC settings'),
   })
 
@@ -94,6 +114,41 @@ export default function SSOSettings({ embedded = false }) {
           <div style={s.title}>Single Sign-On</div>
         </div>
       )}
+
+      {/* Enforcement */}
+      <div style={s.card}>
+        <div style={{ ...s.cardHeader, borderBottom: 'none' }}>
+          <div>
+            <div style={s.cardTitle}>Require SSO</div>
+            <div style={s.cardSub}>
+              Turn off email/password sign-in, self-registration and local passwords. API tokens keep working for accounts linked to SSO.
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {policy?.effective && <span style={{ fontSize: 10, color: 'var(--green)', fontWeight: 700, whiteSpace: 'nowrap' }}>● ENFORCED</span>}
+            <button
+              style={{ ...s.btn, ...(policy?.enforce_sso ? { color: 'var(--red)', borderColor: 'var(--red-mid)' } : {}) }}
+              onClick={toggleEnforce}
+              disabled={savePolicy.isLoading || (!policy?.enforce_sso && !anyEnabled)}
+              title={!anyEnabled ? 'Enable an SSO provider below first' : undefined}
+            >
+              {policy?.enforce_sso ? 'Allow local sign-in' : 'Enforce SSO'}
+            </button>
+          </div>
+        </div>
+        {(!anyEnabled || policy?.break_glass_active) && (
+          <div style={{ padding: '0 20px 16px' }}>
+            {!anyEnabled && (
+              <div style={s.hint}>Enable and test a provider below, then sign in through SSO yourself before enforcing it. That way you can't lock yourself out.</div>
+            )}
+            {policy?.break_glass_active && (
+              <div style={{ ...s.hint, color: 'var(--red)' }}>
+                ALLOW_LOCAL_LOGIN is set on the server, so local sign-in is still allowed. Remove it and restart once SSO is working again.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* SAML2 */}
       <div style={s.card}>

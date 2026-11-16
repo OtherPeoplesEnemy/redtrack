@@ -63,6 +63,8 @@ export const ssoApi = {
   adminGet: () => api.get('/admin/sso'),
   saveSaml: (data) => api.put('/admin/sso/saml', data),
   saveOidc: (data) => api.put('/admin/sso/oidc', data),
+  getPolicy: () => api.get('/admin/auth-policy'),
+  savePolicy: (data) => api.put('/admin/auth-policy', data),
   samlLoginUrl: () => '/api/auth/sso/saml/login',
   oidcLoginUrl: () => '/api/auth/sso/oidc/login',
 }

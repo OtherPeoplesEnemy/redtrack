@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { useAuth } from '../hooks/useAuth'
-import api, { authApi, tokensApi } from '../api/client'
+import api, { authApi, tokensApi, ssoApi } from '../api/client'
 import Integrations from './Integrations'
 import SSOSettings from './SSOSettings'
 import JumpBoxSettings from './JumpBoxSettings'
@@ -14,6 +14,10 @@ export default function Settings() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const isAdmin = user?.role === 'admin'
+  // When SSO is enforced, local passwords are meaningless: hide the
+  // change-password form and the password field on new users.
+  const { data: ssoStatus } = useQuery('sso-status', () => ssoApi.status().then(r => r.data))
+  const localLogin = ssoStatus?.local_login_enabled ?? true
   // Provisioning config writes to the hypervisor, so it follows the same
   // lead-or-admin gate the backend endpoints use.
   const canManageJumpBoxes = isAdmin || user?.role === 'lead'
@@ -163,7 +167,7 @@ export default function Settings() {
                 <button style={s.btnPrimary} onClick={() => toast.success('Profile updated (reload to see changes)')}>Save Profile</button>
               </div>
 
-              <div style={s.card}>
+              {localLogin && <div style={s.card}>
                 <div style={s.sectionSubtitle}>Change Password</div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
                   {[['current_password', 'Current Password'], ['new_password', 'New Password'], ['confirm_password', 'Confirm Password']].map(([f, l]) => (
@@ -179,7 +183,7 @@ export default function Settings() {
                   toast.success('Password updated')
                   setPwForm({ current_password: '', new_password: '', confirm_password: '' })
                 }}>Change Password</button>
-              </div>
+              </div>}
             </div>
           )}
 
@@ -296,7 +300,7 @@ export default function Settings() {
                 <div style={{ ...s.card, marginBottom: 16, borderColor: 'var(--border2)' }}>
                   <div style={s.sectionSubtitle}>Create New User</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    {[['full_name', 'Full Name'], ['username', 'Username'], ['email', 'Email'], ['password', 'Password']].map(([f, l]) => (
+                    {[['full_name', 'Full Name'], ['username', 'Username'], ['email', 'Email'], ...(localLogin ? [['password', 'Password']] : [])].map(([f, l]) => (
                       <div key={f}>
                         <label style={s.label}>{l}</label>
                         <input type={f === 'password' ? 'password' : 'text'} style={s.input} value={newUser[f]} onChange={e => setNewUser({ ...newUser, [f]: e.target.value })} />
@@ -313,7 +317,15 @@ export default function Settings() {
                     </select>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button style={s.btnPrimary} onClick={() => createUserMutation.mutate(newUser)} disabled={createUserMutation.isLoading}>
+                    {!localLogin && (
+                      <div style={{ fontSize: 10, color: 'var(--muted2)', alignSelf: 'center', marginRight: 8 }}>
+                        SSO is enforced: the account links on first SSO sign-in by email.
+                      </div>
+                    )}
+                    <button style={s.btnPrimary} onClick={() => {
+                      const { password, ...rest } = newUser
+                      createUserMutation.mutate(localLogin ? newUser : rest)
+                    }} disabled={createUserMutation.isLoading}>
                       Create User
                     </button>
                     <button style={s.btn} onClick={() => setShowNewUser(false)}>Cancel</button>

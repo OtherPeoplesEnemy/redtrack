@@ -15,12 +15,16 @@ export default function Login() {
   const [email, setEmail] = useState('admin@redtrack.com')
   const [password, setPassword] = useState('RedTrack2026!')
   const [loading, setLoading] = useState(false)
-  const [sso, setSso] = useState({ saml_enabled: false, oidc_enabled: false })
+  const [sso, setSso] = useState({ saml_enabled: false, oidc_enabled: false, local_login_enabled: true })
+  const [statusLoaded, setStatusLoaded] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
 
   useEffect(() => {
-    ssoApi.status().then(({ data }) => setSso(data)).catch(() => {})
+    ssoApi.status()
+      .then(({ data }) => setSso(data))
+      .catch(() => {})
+      .finally(() => setStatusLoaded(true))
   }, [])
 
   async function handleSubmit() {
@@ -28,8 +32,10 @@ export default function Login() {
     try {
       await login(email, password)
       navigate('/')
-    } catch {
-      toast.error('Invalid credentials')
+    } catch (e) {
+      toast.error(e.response?.status === 403
+        ? (e.response.data?.detail || 'Local sign-in is disabled. Sign in with SSO.')
+        : 'Invalid credentials')
     } finally {
       setLoading(false)
     }
@@ -56,13 +62,16 @@ export default function Login() {
                   Sign in with SSO →
                 </a>
               )}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 18px' }}>
+              {sso.local_login_enabled && <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 18px' }}>
                 <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
                 <span style={{ fontSize: 10, color: 'var(--muted2)', textTransform: 'uppercase', letterSpacing: '.08em' }}>or</span>
                 <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-              </div>
+              </div>}
             </>
           )}
+          {/* Hidden until /auth/sso/status answers so an SSO-only server
+              doesn't flash a password form it will refuse anyway. */}
+          {statusLoaded && sso.local_login_enabled && (<>
           <div style={{ marginBottom: 14 }}>
             <label style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.08em', display: 'block', marginBottom: 5 }}>Email</label>
             <input
@@ -87,6 +96,12 @@ export default function Login() {
           <div style={{ fontSize: 10, color: 'var(--muted2)', textAlign: 'center', marginTop: 16 }}>
             admin@redtrack.com / RedTrack2026!
           </div>
+          </>)}
+          {statusLoaded && !sso.local_login_enabled && (
+            <div style={{ fontSize: 10, color: 'var(--muted2)', textAlign: 'center', marginTop: 10, lineHeight: 1.6 }}>
+              This server requires single sign-on.
+            </div>
+          )}
         </div>
       </div>
     </div>

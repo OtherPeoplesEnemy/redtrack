@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # Public base URL of this deployment — used to build SAML ACS / metadata
     # URLs and the OIDC redirect_uri. Must match what's registered with the IdP.
     frontend_url: str = "https://localhost"
+    # ── Break-glass local login ───────────────────────────────────────
+    # When an admin turns on "Enforce SSO", password sign-in is refused for
+    # everyone. If the IdP is down or misconfigured, set ALLOW_LOCAL_LOGIN=true
+    # in .env and restart the backend to let local accounts back in. Only
+    # someone with host access can do this, and every login made under it is
+    # logged at WARNING. Turn it back off once SSO is fixed.
+    allow_local_login: bool = False
+
     upload_dir: str = "/app/uploads"
     max_upload_size_mb: int = 25
     redis_url: str = "redis://redis:6379"
